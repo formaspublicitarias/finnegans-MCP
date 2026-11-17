@@ -172,8 +172,9 @@ Each person enters only what is personal. The form changes as follows:
 key that already appears inside every `$ref` of the spec, so it isn't a personal
 secret. It still must never be in the public repo.
 
-- The packing script reads `FINNEGANS_SWAGGER_KEY` from the local `.env` at
-  build time.
+- The packing script reads `FINNEGANS_SWAGGER_KEY` from the environment at
+  build time, never from a `.env` file. This follows the existing repo rule for
+  scripts.
 - It writes the key as the field's `default` into the manifest copy that goes
   inside the `.mcpb`.
 - The committed `manifest.json` keeps no default.

@@ -1,788 +1,690 @@
-# Finnegans MCP — online version, adapted per person (design)
+# Finnegans MCP — per person, then online (design)
 
 Date: 2026-11-17 · Author: Juan Sbatella (with Claude)
 Builds on: `2026-11-02-finnegans-mcp-extension-design.md` (the desktop extension, v1.0.2)
 
 ## 1. Intent
 
-Today the Finnegans assistant runs as a Claude Desktop extension
-(`finnegans.mcpb`). Each person installs it on their PC and types their own
-Finnegans API keys into a form. It works, but only on a PC where it was
-installed, never on the phone, and every person sees the whole API whether or not
-their Finnegans account can use it.
+Today the Finnegans connector runs as a Claude Desktop extension
+(`finnegans.mcpb`). The Claude organization distributes it, and each person types
+API keys into its settings form. Two things are missing:
 
-The online version puts the same assistant on a public HTTPS address. Anyone at
-SOUTEX or Formas adds it once in Claude (web, desktop or mobile), signs in with
-their company Google account, and gets an assistant that only offers what
-**their own** Finnegans account allows. Nothing is installed on anyone's device.
+1. **It doesn't adapt to the person.** Finnegans permissions differ by account.
+   A restricted account tested on 2026-11-17 was denied 100 of 238 reports and
+   13 of 126 entities. Today the connector shows everyone the whole API, so a
+   restricted person hits dead ends. On top of that, the connector reports
+   those refusals as "your keys are wrong" or "a parameter is missing".
+2. **It only works on a PC with Claude Desktop.** It doesn't work on the phone
+   or on claude.ai in a browser.
 
-Why per person: Finnegans permissions differ by account. A restricted account
-tested on 2026-11-17 was denied 100 of 238 reports and 13 of 126 entities.
-Showing those endpoints to that person only produces dead ends and confusing
-errors.
+The work happens in two phases, so each one delivers something usable and nothing
+is thrown away:
 
-## 2. Goals
+- **Phase 1 — Per person, on the desktop, ready for a container.**
+  - Each person uses their own Finnegans API keys.
+  - The connector learns that person's permissions and only offers what they
+    can use.
+  - Refusals are explained correctly.
+  - Distribution is unchanged: the `.mcpb` is uploaded to the Claude
+    organization and updates reach everyone.
+  - The code is shaped so it can run in a container with only the strictly
+    necessary additions.
+- **Phase 2 — Online (option A).** The same Python connector runs in one shared
+  container on Cloudflare, behind a Worker that handles Google sign-in, an admin
+  page and a shared change log. It works on the phone and in the browser with
+  nothing installed. The desktop extension stays as a backup and gets the same
+  fixes.
 
-1. **No install, any device.** One connector URL that works in claude.ai,
-   Claude Desktop and Claude mobile.
-2. **Company sign-in.** People sign in with a Google account from either company
-   domain. Only people an admin has added get in.
-3. **Each person acts as themselves in Finnegans.** Every call uses that
-   person's own Finnegans API keys, which an admin loads once. People never see
-   or type keys.
-4. **Adapted per person.** Search and `ver_endpoint` only show the endpoints that
-   person's account can use. Permission refusals are explained in plain Spanish.
-5. **Changes from day one.** `escribir` works online exactly as on desktop: it
-   saves, then shows the diff. Each person's Finnegans permissions set the limits.
-6. **Who did what.** Every change is logged with who, when, which record and the
-   diff. Reads are logged without their data.
-7. **One program, two ways to run it.** The same Python server runs as the
-   desktop extension and as the online version, and fixes reach both.
-8. **Stay at or near the $5 Workers Paid plan.** Target: no more than about $3 a
-   month on top (§14).
+Phase 1 is planned and built first. Phase 2 is designed here so Phase 1 doesn't
+paint it into a corner. It gets its own plan when Phase 1 is done.
 
-## 3. Non-goals
+## 2. Decisions made in the conversation
 
-- **Narrow versions** (`/mcp/facturar`, `/mcp/compras`, …). Finnegans
-  permissions already narrow what each person can do, and guidance for a
-  specific job comes from skills each person writes in Claude. The design leaves
-  room to add a guided version at its own URL later, but none is built now.
-- **`exportar` online.** The online version has no export tool and no file
-  storage. The desktop extension keeps `exportar` unchanged.
-- **Periodic permission scans.** Permissions rarely change in Finnegans. A scan
-  runs when a person is added or their keys change, plus whenever an admin
-  presses "Reescanear". Live calls correct the map in between (§8).
-- **Probing write permissions up front.** There is no safe way to test a write
-  without writing, so write permission is learned from real refusals only.
-- **Rewriting the server in TypeScript**, or running it without a container.
-- **One container per person.** It was considered first (§6) and dropped for cost.
-- **Moving the desktop extension to its own repo.** It stays here and gets the
-  same fixes.
+- **Roadmap:** Phase 1 (desktop, per person, ready for a container), then Phase 2
+  (online, option A).
+- **Distribution in Phase 1:** as today. The `.mcpb` is uploaded to the Claude
+  organization and updates reach the whole team.
+- **Keys:** each person acts with their own Finnegans API keys.
+- **Option A for Phase 2:** the Python connector in one shared container on
+  Cloudflare (the standard design for remote MCP servers). Rejected:
+  - one container per person, for cost;
+  - a TypeScript rewrite on Workers, because of the effort, the weaker analysis
+    of big results, and the risk of re-implementing the write logic with no
+    Finnegans test environment.
+- **Phase 2 sign-in:** company Google accounts from two domains (SOUTEX and
+  Formas).
+- **Phase 2 admins:** Juan and Rodrigo. Hosting is Rodrigo's Cloudflare account,
+  where Juan is a member.
+- **Budget:** stay at or near the $5 Workers Paid plan. Phase 1 costs nothing.
+- **Writes:** allowed from day one, limited by each person's Finnegans
+  permissions.
+- **No periodic permission scans:** an initial scan plus a manual rescan is
+  enough, because permissions rarely change.
+- **No narrow versions:** permissions narrow what each person sees, and people
+  write their own skills for guidance.
+- **No `exportar` online.** The desktop extension keeps it.
+- **One program:** desktop and online run the same code and get the same fixes.
+- **Repo:** `formaspublicitarias/finnegans-MCP`, public.
 
-## 4. Anti-goals (failure even if it technically works)
+## 3. Goals, non-goals, anti-goals
 
-- One person seeing another person's tables, results, keys or log entries. With
-  one shared server, this is the main risk. §11 and §15 exist to rule it out.
-- A Finnegans key, token, swagger key or docs key appearing in any tool output,
-  admin page, log line, audit entry or committed file.
-- Someone who isn't on the admin's list using the connector.
-- Someone who was removed from the list still using it after their next request.
+**Goals**
+
+1. Each person works in Finnegans as themselves, with their own API keys.
+2. Search and `ver_endpoint` only offer what that person's account can use.
+3. Every permission refusal is explained correctly, in plain Spanish.
+4. Changes keep working exactly as today: save, then show the diff.
+5. Phase 1 ships through the same channel as today, with no new infrastructure
+   and $0 extra.
+6. After Phase 1, going online is mostly new pieces around the connector, not a
+   rework of it.
+7. Phase 2:
+   - no install, on any device;
+   - company sign-in;
+   - an admin page;
+   - a shared change log of who did what.
+
+**Non-goals**
+
+- Periodic permission scans.
+- Probing write permissions up front. There's no safe way to test a write
+  without writing, so write permission is learned from real refusals.
+- Narrow versions (`/mcp/facturar`, …). The design leaves room for them later.
+- A shared change log in Phase 1. Each PC only knows its own changes. First,
+  check whether Finnegans already records which API user changed each record
+  (§5.6).
+- A TypeScript rewrite, or one container per person.
+- Moving the desktop extension to its own repo.
+
+**Anti-goals** (failure even if it technically works)
+
 - A permission refusal reported as "your keys are wrong" or "a parameter is
-  missing". Today's extension does this (§8.4).
-- Permission scans putting real load on Finnegans' production system (§8.2).
+  missing".
+- A permission scan that puts real load on production Finnegans (§5.3).
+- A Finnegans key, token, swagger key or docs key showing up in:
+  - any tool output, log line or exported file;
+  - the public repo.
+- Phase 2: one person seeing another person's tables, results, keys or log
+  entries.
 - The desktop extension and the online version drifting into two programs.
 
-## 5. Constraints and verified facts
+## 4. Facts and constraints (verified 2026-11-17)
 
-**Cloudflare** (checked 2026-11-17)
-- Containers have been generally available since 2026-04-13. They need the
-  Workers Paid plan ($5/month), which runs in Rodrigo Mateus's Cloudflare
-  account. Juan is already a member of that account.
-- A container is reached only through a Durable Object. Cold start takes about
-  1–3 s plus our own start-up work.
-- Disk is ephemeral: a restarted container starts clean.
-- An idle timeout stops the container (`setInactivityTimeout`, up to 6 h). On
-  stop it gets SIGTERM, then SIGKILL after up to 15 min.
-- Environment variables reach the container on `start()` through the `env`
-  option. `enableInternet: true` is needed for Finnegans calls.
-- Instance types:
+**Finnegans** (read-only checks; see memory `finnegans-permisos-por-cuenta`)
 
-  | Type | vCPU | Memory | Disk |
-  |---|---|---|---|
-  | `lite` | 1/16 | 256 MiB | 2 GB |
-  | `basic` | 1/4 | 1 GiB | 4 GB |
-  | `standard-1` | 1/2 | 4 GiB | 8 GB |
-
-  Larger types also exist.
-- Billing: memory and disk are billed while the container runs; CPU only while
-  it's in use.
-- Included per month in Workers Paid:
-  - 25 GiB-h memory, then $0.0000025 per GiB-s (about $0.009 per GiB-hour);
-  - 375 vCPU-min, then $0.000020 per vCPU-s;
-  - 200 GB-h disk, then $0.00000007 per GB-s;
-  - egress: 500 GB to 1 TB depending on region.
-- Workers requests, Durable Objects, D1 and KV each have their own included
-  amounts. At this scale they stay well inside them.
-- `@cloudflare/workers-oauth-provider` implements the OAuth server side on a
-  Worker:
-  - client registration through DCR and through CIMD
-    (`clientIdMetadataDocumentEnabled`, which needs the
-    `global_fetch_strictly_public` compatibility flag);
-  - PKCE;
-  - it hands the signed-in user's props to the API handler;
-  - its storage is a KV namespace bound as `OAUTH_KV`.
-
-**Claude connectors** (checked 2026-11-17)
-- claude.ai, Desktop and mobile share one OAuth client, with the callback
-  `https://claude.ai/api/mcp/auth_callback`.
-- Claude Code uses a loopback redirect on any port (`http://localhost/callback`,
-  `http://127.0.0.1/callback`). Supporting it is cheap.
-- Sign-in starts only on a **401** with
-  `WWW-Authenticate: Bearer resource_metadata="…"`.
-- The protected resource metadata's `resource` must equal the connector URL
-  exactly. Claude uses only the first entry in `authorization_servers`.
-- CIMD is used only if the authorization server metadata advertises both
-  `client_id_metadata_document_supported: true` and `"none"` in
-  `token_endpoint_auth_methods_supported`. Otherwise Claude falls back to DCR.
-- PKCE S256 is required.
-- The token endpoint must:
-  - accept form-urlencoded bodies;
-  - return `invalid_grant` for a dead refresh token;
-  - rotate refresh tokens for public clients.
-- Claude allows 10 s for discovery, registration and token calls, and 30 s for
-  a refresh.
-- Anthropic's outbound traffic comes from `160.79.104.0/21`.
-
-**MCP Python SDK** (installed: `mcp` 2.3.0)
-- `MCPServer.run(transport="streamable-http", host=…, port=…,
-  stateless_http=…, json_response=…, transport_security=…)` exists.
-- DNS-rebinding protection checks the Host header against `allowed_hosts`.
-- Sync tools run in worker threads via `anyio.to_thread.run_sync`, which copies
-  `contextvars`. So a per-request context variable set before the tool runs is
-  visible inside it. The builder confirms this with a test.
-
-**Finnegans** (verified live 2026-11-17, read-only; see memory
-`finnegans-permisos-por-cuenta`)
-- swaggerGlobal works only with the company docs key and returns the same 586
-  paths for everyone. It rejects API tokens, so there is no per-account swagger.
+- swaggerGlobal works only with the company docs key and gives the same 586
+  paths to everyone. It rejects API tokens, so there's no per-account swagger.
 - No endpoint lists an account's permissions.
 - **Reports:** a denied account gets `403 "Forbidden: Prestacion sin permiso"`
-  *before* parameter validation. An allowed account's report actually **runs**,
-  even without parameters.
+  *before* parameter validation. For an allowed account, the report actually
+  **runs**, even without parameters.
 - **Entities:** `GET /{entidad}/ZZ-NOEXISTE` answers 404 when allowed, or 500
   `"No tiene permisos para transacciones de la categoría…"` when denied.
-- A full scan is about 364 calls and took about 2 minutes. Write refusals have
-  not been observed yet.
+- A full scan is about 364 calls and took about 2 minutes.
+- Write refusals have not been observed yet.
+- **There is no test environment.** Production already holds test records, so
+  any write bug lands on real data.
+- **The documentation keys** (`x-client-id`, `x-secret-key`) are personal, per
+  Finnegans' own documentation: each user finds them in Finnegans GO under
+  Modificar perfil → Datos personales.
 
-**Repo rules that carry over**
+**Current code**
+
+- `Settings.from_env` reads every key from environment variables. The manifest
+  fills them from the settings form: client ID, client secret, swagger key,
+  docs client ID and docs secret key, all required today.
+- `errores.traducir_error` turns a read 403 "Prestacion sin permiso" into
+  "credenciales rechazadas", and a 500 "No tiene permisos" into "falta un
+  parámetro".
+- `FinnegansClient` re-authenticates and retries on every 403, which doubles
+  each refused call.
+- `crear_servidor` closes over a single client, workspace, `origen_tabla`,
+  redactor and lock.
+- Responses are capped at `RESPUESTA_MAX_CHARS` = 8,000 characters.
+- Finnegans calls time out after 30 s.
+- 413 tests.
+
+**Claude, Cloudflare, MCP SDK** (relevant to Phase 2): see §6.1.
+
+**Repo rules**
+
 - Never read, print or commit `.env` values. Tests use fake credentials only.
-- Admin emails and company domains live in deployment settings, never in code,
-  docs or the `.mcpb`.
+- No admin emails, company domains or account IDs in committed files.
 - No production writes from tests or scripts without Juan's explicit go.
-- The redactor rule stays: **redact first, then truncate**.
+- **Redact first, then truncate.**
 - User-facing text is in Spanish (Argentina).
 
-## 6. Approaches considered
+## 5. Phase 1 — per person on the desktop, ready for a container
 
-| Approach | Trade-off | Verdict |
+### 5.1 The settings form
+
+Each person enters only what is personal. The form changes as follows:
+
+| Field | Today | Phase 1 |
 |---|---|---|
-| **B. One shared server for everyone** (the standard design for remote MCP servers), behind a Worker that handles sign-in, admin and keys | One container, awake only during working hours, so cost stays near the plan (§14). The server must keep each person's token, tables and permission map apart in one process, which is real refactoring with isolation tests. | **Chosen by Juan** |
-| A. One container per person | The server barely changes, and isolation comes from the design itself. Cost grows with every active person: about $15/month on top of the plan for 15 people at 4 h/day. | Rejected (cost; not the standard design) |
-| C. Rewrite on Workers without containers | Loses DuckDB and the proven search and vocabulary logic for no gain. | Rejected |
+| Client ID de Finnegans | required | required, personal |
+| Client secret de Finnegans | required | required, personal |
+| Clave del swagger | required | **pre-filled** in the build uploaded to the organization (see below); hidden under "avanzado" |
+| Docs client ID / secret | required | **open decision, see §9** |
+| Carpeta de exportación | optional | unchanged |
 
-Juan first chose A. After seeing the costs, and given that he prefers the
-standard design, he switched to B.
+**Pre-filling the swagger key.** It's a company-wide, read-only documentation
+key that already appears inside every `$ref` of the spec, so it isn't a personal
+secret. It still must never be in the public repo.
 
-## 7. Architecture
+- The packing script reads `FINNEGANS_SWAGGER_KEY` from the local `.env` at
+  build time.
+- It writes the key as the field's `default` into the manifest copy that goes
+  inside the `.mcpb`.
+- The committed `manifest.json` keeps no default.
+- The `.mcpb` uploaded to the organization is not published anywhere public.
+  *(Claude's call; Juan can choose to keep the field typed by hand instead.)*
+
+**Form texts.** They stop saying "Te lo pasa Juan Sbatella" for personal keys.
+They say where the person gets them, or that an admin hands them over, using
+generic wording.
+
+### 5.2 One per-person context (the container seam)
+
+`server.py` stops closing over single objects. Everything that belongs to one
+person moves into a `Contexto`:
 
 ```
-Claude (web / desktop / mobile)
-   │  HTTPS, OAuth bearer token
-   ▼
-Worker  "finnegans-remoto"  (TypeScript)
-   ├─ OAuth server for Claude (workers-oauth-provider: CIMD + DCR + PKCE)
-   ├─ Google sign-in (OIDC) for people and for the admin page
-   ├─ /admin        admin page (Juan, Rodrigo)
-   ├─ /mcp          checks the person is active → forwards with internal headers
-   ├─ /_interno/*   callbacks from the container (shared secret)
-   ├─ audit log     written from the traffic it forwards
-   ├─ D1            people, encrypted keys, permission maps, audit log
-   └─ secrets       master key, Google client, swagger key, docs keys, internal secret
-          │
-          ▼
-Durable Object "Servidor" (a single instance) → starts/stops the one container, forwards
-          │
-          ▼
-Container (Python, same server as the .mcpb, started in online mode)
-   ├─ MCPServer over streamable HTTP (stateless, JSON responses), 7 tools
-   ├─ one Contexto per person: Finnegans client + token, DuckDB workspace, permission map
-   ├─ shared by all: swagger catalog, docs search (same company keys for everyone)
-   └─ permission scanner
-          │
-          ▼
-api.finneg.com · swaggerGlobal · Finnegans docs MCP
+Contexto
+  client        FinnegansClient (this person's keys and token)
+  workspace     Workspace (in-memory DuckDB, private temp dir)
+  origen_tabla  where each table came from
+  candado       RLock for DuckDB
+  permisos      Permisos (the map, see 5.3–5.4)
 ```
 
-### 7.1 Connector URL
+- A `contextvars.ContextVar` holds the current `Contexto`. Every tool reads it at
+  the start of each call, never at registration time.
+- On the desktop there is exactly one `Contexto`, built at start-up from
+  `Settings.from_env()`. Behaviour is identical to today.
+- **Phase 2 adds** a registry that finds or creates the `Contexto` per signed-in
+  person (§6.4). Nothing in the tools changes.
+- `SwaggerCatalog` and `DocsMcp` stay shared at process level. They hold
+  company-wide metadata, not results.
+- The mode (`escritorio` | `remoto`) is a parameter of `crear_servidor`. It
+  decides:
+  - the tool set (`exportar` only on the desktop);
+  - the instructions text;
+  - how messages refer to "who to ask": on the desktop, the extension's
+    settings; online, `FINNEGANS_CONTACTO_ADMIN`.
+- **Rule for the builder:** no tool may depend on MCP session state, and nothing
+  person-specific may be stored outside the `Contexto`. Both are needed for
+  Phase 2.
 
-At launch the URL is `https://finnegans-remoto.<subdomain>.workers.dev/mcp`. A
-custom domain on a company zone can come later. Changing the URL means
-everyone re-adds the connector, so do it before the team rollout or not at all.
-*(Builder's call; noted.)*
+### 5.3 The permission scan
 
-### 7.2 Sign-in flow (people)
+New module `finnegans_core/permisos.py`. It runs with that person's own token.
 
-1. Claude calls `/mcp` without a token. The Worker answers **401** with
-   `WWW-Authenticate: Bearer resource_metadata="https://…/.well-known/oauth-protected-resource"`.
-   The metadata's `resource` is exactly the `/mcp` URL.
-2. Claude registers, by CIMD if possible and otherwise by DCR, then opens
-   `/authorize`.
-3. The Worker's `/authorize` sends the person to Google OIDC.
-   - There are two company domains (SOUTEX and Formas), so the Google OAuth
-     client is **External**, with publishing status **In production**.
-   - It asks only for `openid email profile`. These scopes are non-sensitive, so
-     Google doesn't require app verification, and "In production" avoids the
-     testing mode's 100-user cap.
-   - No `hd` hint is sent.
-4. On return, the Worker verifies the ID token: issuer, audience, and
-   `email_verified = true`.
-   - Both the `hd` claim **and** the email's domain must be in
-     `ALLOWED_DOMAINS`, a comma-separated Worker variable set at deploy time
-     (never committed). A personal `@gmail.com` account has no `hd` and is
-     refused.
-   - The real gate is the list of people. The Worker looks up the email in
-     `personas`:
-     - **active** → `completeAuthorization()` with props `{ email }`, then back
-       to Claude.
-     - **unknown or disabled** → a Spanish page: "Todavía no tenés acceso al
-       asistente de Finnegans. Pedíselo a Juan o a Rodrigo." No token is issued.
-       The names come from the `CONTACTO_ADMIN` variable.
-5. **Every** `/mcp` request re-checks that the email is still active (a cached
-   lookup of up to 60 s is fine). Removing someone takes effect on their next
-   request. The Worker also tells the container to drop that person's context
-   (`POST /_interno/olvidar`).
-
-### 7.3 Admin page (`/admin`)
-
-- **Access:**
-  - Same Google sign-in, with a separate cookie session.
-  - Only emails listed in the `ADMIN_EMAILS` secret (Juan and Rodrigo) get in.
-    Everyone else gets 403.
-  - Every write action carries a CSRF token.
-  - The session cookie is `HttpOnly`, `Secure` and `SameSite=Lax`, and lasts
-    8 h.
-- **Screens** (Spanish, plain, phone-friendly):
-  - **Personas:** a list with name, email, active, last use, and a permission
-    summary such as "138 de 238 reportes · 113 de 126 entidades · escaneado el
-    17/11". Actions: add, disable/enable, remove, and "Reescanear".
-  - **Agregar / reemplazar claves:** email, name, Finnegans client ID and client
-    secret.
-    - Saving first checks the token against Finnegans and refuses keys that
-      don't authenticate.
-    - Saved secrets are never shown again: the fields are write-only and show
-      only "cargada el 17/11/2026".
-    - Saving new keys drops that person's context in the container and starts a
-      scan.
-  - **Registro:** the audit log, filterable by person, date, tool and "solo
-    cambios".
-
-### 7.4 Keys and secrets
-
-- **Per person** (in D1): the Finnegans `client_id` and `client_secret`.
-  - Each is encrypted with AES-256-GCM, using `MASTER_KEY` (a Worker secret) and
-    a random nonce per value.
-  - The AAD is the person's email, so a ciphertext copied to another row fails
-    to decrypt.
-  - A `clave_version` column allows rotating `MASTER_KEY` later.
-- **Shared** (Worker secrets and variables only):
-  - `FINNEGANS_SWAGGER_KEY`, `FINNEGANS_DOCS_CLIENT_ID`,
-    `FINNEGANS_DOCS_SECRET_KEY`;
-  - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`;
-  - `MASTER_KEY`, `INTERNAL_SECRET`;
-  - `ADMIN_EMAILS`, `ALLOWED_DOMAINS`, `CONTACTO_ADMIN`.
-- **The container** gets the shared Finnegans keys and `INTERNAL_SECRET` as env
-  vars at start. These are the env vars `Settings.from_env` already reads, minus
-  the per-person ones.
-- **Per-person keys reach the container per request** (§7.5). They are decrypted
-  by the Worker, sent only on the internal hop, and never logged by either side.
-- Worker code never logs a URL with a query string, an env var, a header
-  starting with `X-Finnegans-`, or a key column.
-
-### 7.5 Worker → container
-
-- **One Durable Object** (`idFromName("servidor")`) runs one container,
-  instance `basic` (1 GiB).
-- **Idle timeout:** 15 minutes. The container sleeps nights and weekends and
-  wakes on the first request, which then waits a few extra seconds.
-- **Readiness:** before forwarding, the Durable Object waits until `GET /salud`
-  answers.
-- **Start failure:** if the container can't start, the person gets a Spanish MCP
-  error ("El asistente no pudo arrancar, probá de nuevo en un minuto"), never a
-  raw 5xx page.
-- **Forwarding** applies only to `/mcp`. The Worker **removes** any incoming
-  `X-Finnegans-*` header, then adds:
-  - `X-Finnegans-Persona: <email>`, taken from the verified OAuth props and never
-    from anything the client sent;
-  - `X-Finnegans-Client-Id` and `X-Finnegans-Client-Secret`, the person's keys,
-    decrypted;
-  - `X-Finnegans-Clave-Version` and `X-Finnegans-Permisos-Version`;
-  - `X-Finnegans-Firma`: an HMAC-SHA256, keyed with `INTERNAL_SECRET`, over the
-    email, both versions and a timestamp.
-- **The container rejects any `/mcp` request** whose signature is missing, wrong,
-  or more than 60 s old. Only the Durable Object can reach the container, so
-  this is defence in depth.
-- **Internal paths** (`/salud`, `/_interno/*`) are not reachable through the
-  public `/mcp` route.
-- **Transport:**
-  - The container runs with `stateless_http=True, json_response=True`. No tool
-    depends on MCP session state, because each person's tables belong to their
-    `Contexto`, not to a session. A container restart therefore never breaks a
-    conversation with "unknown session".
-  - DNS-rebinding protection stays on, with `allowed_hosts` set to the host the
-    Durable Object uses when forwarding.
-  - The Durable Object's forward allows up to 240 s per request.
-
-### 7.6 Container → Worker callbacks
-
-The container calls the Worker at `/_interno/*`, with
-`Authorization: Bearer <INTERNAL_SECRET>`:
-
-- `GET /_interno/permisos?email=…` returns that person's permission map and its
-  version.
-- `POST /_interno/permisos` sends corrections learned from live calls:
-  `{email, path, acceso, fuente}`.
-- `POST /_interno/escaneo` delivers a finished scan: `{email, version, filas[]}`.
-
-The Worker serves `/_interno/*` only when the bearer matches, and refuses it on
-any other origin route. Corrections are sent fire-and-forget with a short
-timeout. A lost one costs nothing lasting: the next live call or scan corrects
-the map again.
-
-## 8. Permissions per person
-
-### 8.1 The map
-
-One row per `(email, path)` in D1:
-
-- `acceso`: `permitido` | `denegado` | `desconocido`
-- `fuente`: `escaneo` | `uso`
-- `escaneado_en`
-
-Each person also has:
-
-- `permisos_version`, which goes up on every change;
-- `escaneo_estado` and `escaneo_fin`.
-
-Paths are the swagger's canonical ones: `/reports/{Nombre}`, or `/{entidad}`,
-which also covers its `/{codigo}` and `/list`.
-
-Write refusals are stored separately, per entity (`escritura_denegada = true`),
-because reading and writing are different permissions.
-
-### 8.2 The scan
-
-- **Where:** inside the container, with that person's own token. The admin
-  action calls the Durable Object, which calls `POST /_interno/escanear` with the
-  person's keys in signed headers, as in §7.5. The Durable Object keeps that
-  request open until the scan finishes, so the container can't sleep mid-scan.
-  The result goes to the Worker via `POST /_interno/escaneo`.
-- **When:**
-  - when a person is added;
-  - when their keys are replaced;
-  - when an admin presses "Reescanear".
-
-  There is no periodic scan. Only one scan per person runs at a time.
-- **Targets:** every viewer and every entity in the swagger.
+- **Targets:** every report (viewer) and every entity in the swagger.
 - **Entities:** `GET /api/{entidad}/ZZ-NOEXISTE`.
   - 500 containing "No tiene permisos" → `denegado`.
   - 404 → `permitido`.
   - Anything else → `desconocido`, which is treated as allowed.
 - **Reports:** `GET /api/reports/{Nombre}`.
   - 403 containing "Prestacion sin permiso" → `denegado`.
-  - **Anything else → `permitido`**, including 200, 500 and timeouts. The denial
-    arrives before any work starts, so a slow answer means the report is
+  - Anything else → `permitido`, including 200, 500 and timeouts. The denial
+    comes back before any work starts, so a slow answer means the report is
     running, which means it's allowed.
-- **Load on Finnegans:** closing the connection doesn't stop a report that has
-  already started. With no params, a probe of an allowed report really runs
-  that report, possibly over its whole history.
-  - **First task of the plan, a read-only spike with Juan's account.** Find a
-    report probe that, when allowed, fails fast **after** the permission check.
-    Candidates: an invalid value for a required parameter, `desde` after
-    `hasta`, or a 1-day range. Measure 3–5 known-heavy reports. If one works, it
-    becomes the report probe.
-  - **Until such a probe is proven**, scans that include reports run in the
-    evening where possible. The admin page offers "escanear esta noche" as the
-    default, and "ahora" on demand.
-- **Client-side limits:**
+- **Load on Finnegans.** For an allowed account, a report probe without params
+  really runs the report. Closing the connection doesn't stop it, and about 140
+  allowed reports per person means about 140 real report runs per scan.
+  1. **First task of Phase 1: a read-only spike with Juan's account.** Find a
+     report probe that, when allowed, fails fast **after** the permission check.
+     Candidates: an invalid value for a required parameter, `desde` after
+     `hasta`, or a 1-day range. Measure 3–5 known-heavy reports and pick the
+     cheapest probe that keeps both outcomes distinguishable.
+  2. **If no cheap probe exists:**
+     - the automatic scan covers **entities only**;
+     - reports are learned from use (§5.4);
+     - a full scan that includes reports runs only when the person asks for it
+       explicitly, with a warning that it runs about 140 reports on Finnegans.
+- **Gentle on the client side:**
   - at most 4 requests in flight;
   - a 10 s timeout per request;
-  - read only the status line and the first 2 KB of the body, then close;
+  - read only the status line and the first 2 KB of the body;
   - one token for the whole scan.
+- **When:**
+  - automatically in the background, at the first start of the connector, or
+    when the client ID changes;
+  - on request: `verificar_conexion(reescanear=True)`. It starts the scan in the
+    background and answers right away: "Estoy revisando tus permisos, tarda unos
+    2 minutos". *(Claude's call: a parameter on an existing tool, not a new
+    tool.)*
 
-  A full scan takes about 2 minutes.
-- **On failure:** a scan that fails partway keeps the previous map, and the admin
-  page shows "último escaneo falló".
-- **Rescans** replace the `escaneo` rows but keep the `uso` corrections and the
-  `escritura_denegada` rows.
+  There are no periodic scans. While a scan runs or before the first one, nothing
+  is hidden.
+- **A failed scan** keeps the previous map. `verificar_conexion` reports it.
 
-### 8.3 How the map is used
+### 5.4 The permission map and how it's used
 
-The container's `Contexto` loads the map through `GET /_interno/permisos` on
-first use. It reloads when the `X-Finnegans-Permisos-Version` header is newer
-than the version it holds. Until a person's first scan finishes, everything is
-shown and refusals are still translated.
-
-- **`buscar_endpoint`:**
-  - Drops swagger and docs results whose path is `denegado` for this person.
-  - If every match was dropped, it says so plainly: "Lo que buscás existe en
+- **Shape:** one entry per canonical path (`/reports/{Nombre}`, or `/{entidad}`,
+  which covers its `/{codigo}` and `/list`). Each entry has:
+  - `acceso`: `permitido` | `denegado` | `desconocido`;
+  - `fuente`: `escaneo` | `uso`;
+  - `escaneado_en`.
+- **Write refusals** are kept separately per entity (`escritura_denegada`), since
+  reading and writing are different permissions.
+- **Storage behind an interface.** `AlmacenPermisos` has `cargar()`,
+  `guardar_escaneo()` and `corregir(path, acceso, fuente)`.
+  - **Phase 1: `AlmacenLocal`.** One JSON file in the user's app-data folder
+    (`%LOCALAPPDATA%\Finnegans\` on Windows, the platform equivalent elsewhere).
+    It's named by a hash of the client ID, so new keys mean a new map, and no
+    key appears in the file name or contents. Writes are atomic: write a
+    temporary file, then rename.
+  - **Phase 2: `AlmacenRemoto`** (§6.5).
+- **How the tools use it:**
+  - **`buscar_endpoint`:** drops `denegado` results from the swagger and the
+    docs. If everything matched was dropped, it says: "Lo que buscás existe en
     Finnegans, pero tu usuario no tiene permiso. Si lo necesitás, pedíselo a
-    quien administra Finnegans (y después pedí que te reescaneen)."
-  - Entities with `escritura_denegada` are tagged "solo lectura para vos".
-- **`ver_endpoint`:** for a `denegado` path, returns that message instead of the
-  schema. Entities with `escritura_denegada` get the same "solo lectura para
-  vos" tag.
-- **`leer`:** still **tries** a `denegado` path, because a permission may have
-  been granted after the scan.
-  - If the call succeeds, the map is corrected to `permitido` (`fuente: uso`).
-  - If it's refused, the person gets the message from §8.4.
-- **`escribir`:** always listed. A write refused for lack of permission records
-  `escritura_denegada` for that entity. Writes can't be probed, so this is the
-  only source.
-  - The refusal shape for writes hasn't been observed yet. Classify as a
-    permission refusal any 403, and any 500 whose body contains "permiso".
-  - The first real refusal in the audit log confirms the shape.
-- **Paths missing from the map** (for example, new in the swagger since the
-  scan) are treated as allowed.
+    quien administra Finnegans y después pedime que revise tus permisos."
+    Entities with `escritura_denegada` are tagged "solo lectura para vos".
+  - **`ver_endpoint`:** for a `denegado` path, returns that message instead of
+    the schema. It carries the same "solo lectura" tag.
+  - **`leer`:** still **tries** a `denegado` path, because the permission may
+    have been granted after the scan.
+    - Success → corrected to `permitido` (`fuente: uso`).
+    - Refusal → the message from §5.5, and the path is marked `denegado`.
+  - **`escribir`:** always available. A write refused for lack of permission
+    marks `escritura_denegada`.
+    - The shape of a write refusal hasn't been observed yet. Until it is, treat
+      any 403, and any 500 whose body contains "permiso", as a permission
+      refusal.
+  - **Paths not in the map** (for example, new in the swagger) are treated as
+    allowed.
 
-### 8.4 Error translation (also fixes the desktop extension)
+### 5.5 Correct refusal messages
 
-Today the code gets permission refusals wrong:
-
-- `errores.traducir_error` turns a read **403 "Prestacion sin permiso"** into
-  "Finnegans rechazó las credenciales…".
-- It turns a **500 "No tiene permisos…"** into "falta un parámetro".
-- `FinnegansClient` retries every 403 with a fresh token, which doubles each
-  refused call.
-
-The fix goes in `finnegans_core`, so the desktop extension gets it too:
+The fix goes in `finnegans_core`, so both phases get it.
 
 - Detect permission refusals by body text ("Prestacion sin permiso", "No tiene
   permisos"), not only by status code.
-- On a 403 whose body says "sin permiso", don't re-authenticate.
-- New message, depending on the mode:
-  - Online: "Tu usuario de Finnegans no tiene permiso para {acción} en
-    '{recurso}'. Si lo necesitás, pedíselo a quien administra Finnegans."
-  - Desktop: a variant that mentions the extension's API user.
-- Credential messages that point to "configuración de la extensión en Claude
-  Desktop" get an online variant built from `FINNEGANS_CONTACTO_ADMIN`: "avisale
-  a {contacto} para que revisen tus claves".
+- `FinnegansClient` does **not** re-authenticate on a 403 whose body says "sin
+  permiso". The retry on other 401/403 responses stays.
+- New message: "Tu usuario de Finnegans no tiene permiso para {acción} en
+  '{recurso}'. Si lo necesitás, pedíselo a quien administra Finnegans."
+- The existing write-403 message keeps its meaning but uses the same wording.
+- Credential messages ("revisá el Client ID… en la configuración de la
+  extensión") stay for real 401s. Their "who to ask" part comes from the mode
+  (§5.2).
 
-## 9. The server in online mode
+### 5.6 Who did what (investigation only)
 
-`finnegans_mcp` gains an online entry point. The desktop entry point
-(`__main__`, stdio) keeps working with today's behaviour.
+Now that everyone uses their own keys, Finnegans itself may already record which
+API user created or changed each record. Check this read-only on one recently
+changed record: look for fields like `UsuarioModificacion` or similar, or for an
+audit report in the swagger.
 
-### 9.1 Per-person context
+- **If it does:** the guide (`guia escrituras`) explains how to look it up, and
+  Phase 1 needs no change log of its own.
+- **If it doesn't:** the shared change log arrives with Phase 2 (§6.7).
 
-Today `crear_servidor` closes over a single `client`, `workspace`,
-`origen_tabla`, redactor and `candado`. These move into a `Contexto`:
+### 5.7 Also in Phase 1
+
+- Tag the current state as `v1.0.2` before starting.
+- Bump the version to 1.1.0 and upload the new `.mcpb` to the organization.
+- `verificar_conexion` reports the permission state: "Permisos revisados el
+  17/11: 138 de 238 reportes y 113 de 126 entidades disponibles", or "todavía
+  revisando".
+
+### 5.8 Phase 1 testing (fakes only)
+
+- **Scan:**
+  - the classification for every response shape in §5.3, including timeouts;
+  - at most 4 requests in flight;
+  - a failed scan keeps the old map.
+- **Map:**
+  - `AlmacenLocal` round-trips, writes atomically, uses a hash-named file, and
+    never contains a secret;
+  - a new client ID means a new map.
+- **Filter:**
+  - `buscar_endpoint` and `ver_endpoint` hide `denegado` paths;
+  - the "everything was hidden" message;
+  - `leer` self-corrects a stale `denegado`;
+  - write refusals get recorded;
+  - unknown paths are allowed.
+- **Errors:**
+  - the new permission messages for both refusal shapes;
+  - no re-authentication on "sin permiso".
+- **Context:**
+  - every tool reads the current `Contexto`;
+  - a test with two contexts set in turn proves each tool uses whichever one is
+    current, which is the groundwork for Phase 2.
+- **Manifest:**
+  - the committed `manifest.json` has no swagger-key default;
+  - the packing script injects it only into the bundled copy.
+- **Regression:** all 413 current tests still pass, adjusted only where the old
+  wrong messages were asserted.
+
+## 6. Phase 2 — online (option A)
+
+Built after Phase 1, with its own plan. What Phase 2 adds: an HTTP entry point, a
+registry of contexts, a Worker, and a container image. The tools themselves don't
+change.
+
+### 6.1 Facts that apply to Phase 2
+
+**Cloudflare**
+
+- Containers have been generally available since 2026-04-13 and need the Workers
+  Paid plan.
+- A container is reached through a Durable Object.
+- Cold start takes about 1–3 s plus our own start-up work.
+- Disk is ephemeral.
+- `setInactivityTimeout` controls idle sleep (up to 6 h). On stop, the container
+  gets SIGTERM, then SIGKILL after up to 15 min.
+- Env vars are passed via `start({env})`, and `enableInternet: true` is needed.
+- The `basic` instance has 1/4 vCPU, 1 GiB memory and 4 GB disk.
+- Included per month: 25 GiB-h memory, 375 vCPU-min and 200 GB-h disk. After
+  that, about $0.009 per GiB-hour of memory.
+
+**`@cloudflare/workers-oauth-provider`**
+
+- Client registration through DCR and through CIMD (needs
+  `global_fetch_strictly_public`).
+- PKCE.
+- User props are passed to the API handler.
+- The KV binding is `OAUTH_KV`.
+
+**Claude connectors** (claude.ai, Desktop and mobile share them)
+
+- **Callback:** `https://claude.ai/api/mcp/auth_callback`. Claude Code uses a
+  loopback on any port.
+- **Starting sign-in:** sign-in starts only on a **401** with
+  `WWW-Authenticate: Bearer resource_metadata="…"`.
+  - `resource` must equal the URL exactly.
+  - Only the first entry of `authorization_servers` is used.
+- **CIMD:** used only if the metadata advertises
+  `client_id_metadata_document_supported: true` **and** `"none"` in
+  `token_endpoint_auth_methods_supported`. Otherwise Claude falls back to DCR.
+- **PKCE:** S256 is required.
+- **Token endpoint:**
+  - must accept form-urlencoded bodies;
+  - must return `invalid_grant` for a dead refresh token;
+  - must rotate refresh tokens for public clients.
+- **Timeouts:** 10 s for discovery, registration and token; 30 s for refresh.
+- **Egress:** `160.79.104.0/21`.
+
+**MCP SDK 2.3.0**
+
+- `run(transport="streamable-http", stateless_http=…, json_response=…,
+  transport_security=…)`.
+- Sync tools run in threads through `anyio.to_thread.run_sync`, which copies
+  `contextvars`.
+
+### 6.2 Architecture
 
 ```
-Contexto(email)
-  client:      FinnegansClient (this person's keys, own token cache)
-  workspace:   Workspace (own in-memory DuckDB, own private temp dir)
-  origen_tabla, candado (RLock), permisos (map + version), ultimo_uso
+Claude (web / desktop / mobile)
+   │  HTTPS, OAuth bearer token
+   ▼
+Worker "finnegans-remoto" (TypeScript)
+   ├─ OAuth server for Claude (workers-oauth-provider: CIMD + DCR + PKCE)
+   ├─ Google sign-in (OIDC) for people and for /admin
+   ├─ /admin        Juan and Rodrigo
+   ├─ /mcp          checks the person is active → forwards with signed internal headers
+   ├─ /_interno/*   callbacks from the container (shared secret)
+   ├─ audit log     written from the traffic it forwards
+   └─ D1            people, encrypted keys, permission maps, audit log
+          ▼
+Durable Object "Servidor" (one) → starts/stops the one container, forwards
+          ▼
+Container: the same Python connector, mode "remoto", stateless HTTP, 7 tools,
+           one Contexto per person (registry), AlmacenRemoto for permission maps
+          ▼
+api.finneg.com · swaggerGlobal · Finnegans docs MCP
 ```
 
-- **Selecting the context:** a `contextvars.ContextVar` holds the current
-  `Contexto`. Every tool reads it at the start of the call, never at
-  registration time.
-  - **Desktop:** one fixed `Contexto`, built from `Settings.from_env()` exactly
-    as today.
-  - **Online:** an ASGI middleware in front of the MCP app verifies the signature
-    (§7.5) and finds or creates the `Contexto` for `X-Finnegans-Persona`, then
-    sets the variable.
-    - If `X-Finnegans-Clave-Version` changed, the old context is closed and
-      rebuilt.
-    - A request without a valid signature gets 401 and never reaches a tool.
-- **Shared across people:** `SwaggerCatalog` and `DocsMcp`. They use the
-  company's docs keys and already cache per process. Only their outputs are
-  filtered per person.
-- **Memory:**
-  - Each `Workspace` is created with a DuckDB `memory_limit` of 128 MB (start
-    value; the builder measures).
-  - At most 6 live contexts. The least recently used one is closed first.
-  - A context idle for 30 minutes is closed and its temp dir deleted.
-  - Each close frees that person's tables. If Claude needs them again, it
-    reloads them. A tool that refers to a table that's gone gets the existing
-    "no hay ninguna tabla … cargada" message.
-- **Redaction:** each output is redacted by a redactor that knows:
-  - that person's keys and token;
-  - the shared keys;
-  - **every other live context's keys and tokens.**
+The URL at launch is `https://finnegans-remoto.<subdomain>.workers.dev/mcp`. A
+custom domain, if any, comes before the team rollout. *(Builder's call.)*
 
-  If anything ever crossed between people, it would still come out masked. Redact
-  first, then truncate.
+### 6.3 Sign-in, admin, keys
 
-### 9.2 Tools and text
+- **Sign-in:**
+  1. Claude gets a 401 with `resource_metadata` and registers through CIMD or
+     DCR.
+  2. The Worker's `/authorize` sends the person to Google, using an **External**
+     OAuth client in production with scopes `openid email profile`. This works
+     with two domains, and the scopes don't need Google's app verification.
+  3. The Worker checks the ID token: `email_verified`, and the `hd` claim plus
+     the email's domain in `ALLOWED_DOMAINS` (a Worker variable, never
+     committed).
+  4. It looks up the email in `personas`:
+     - active → `completeAuthorization({email})`;
+     - otherwise → a Spanish "pedile acceso a {CONTACTO_ADMIN}" page, and no
+       token.
+- **Every `/mcp` request** re-checks that the person is active, with a cache of
+  up to 60 s. Removing someone takes effect on their next request and drops their
+  context.
+- **Admin page** (`/admin`):
+  - **Access:**
+    - same Google sign-in;
+    - only emails in the `ADMIN_EMAILS` secret;
+    - a CSRF token on write actions;
+    - an `HttpOnly`, `Secure`, `SameSite=Lax` session cookie that lasts 8 h.
+  - **Personas:** the list with a permission summary, and actions to add,
+    disable, remove and rescan.
+  - **Agregar / reemplazar claves:** keys are checked against Finnegans before
+    saving. Fields are write-only and never shown again.
+  - **Registro:** the change log, with filters.
+  - **Month's container hours,** to check the cost.
+- **Per-person keys:** stored in D1, encrypted with AES-256-GCM.
+  - The key is `MASTER_KEY`, with a random nonce per value.
+  - The AAD is the email.
+  - A `clave_version` column allows rotation.
+- **Shared secrets:** Worker secrets only. The container receives the shared
+  Finnegans keys and `INTERNAL_SECRET` as env vars at start.
+- **Docs keys:** whatever §9 decides for Phase 1 applies here too. If they're
+  personal, they're stored per person like the API keys.
 
-- Online mode registers **7 tools**, without `exportar`, and uses online
-  instructions: the same five rules without the word "exportar". Rule 3 becomes
+### 6.4 Worker → container
+
+- **One Durable Object, one `basic` container**, with a 15-minute idle timeout.
+  - It sleeps nights and weekends, so the first request after that waits a few
+    seconds.
+  - Before forwarding, the Durable Object waits for `/salud`.
+  - If the container fails to start, Claude gets a Spanish MCP error, never a
+    raw 5xx.
+- **Headers on `/mcp`:**
+  - The Worker **strips** incoming `X-Finnegans-*` headers.
+  - It adds `X-Finnegans-Persona` (from the verified OAuth props only), the
+    person's decrypted keys, `X-Finnegans-Clave-Version` and
+    `X-Finnegans-Permisos-Version`.
+  - It adds `X-Finnegans-Firma`: an HMAC-SHA256 with `INTERNAL_SECRET` over the
+    email, the versions and a timestamp.
+  - Neither side ever logs these headers.
+- **The container's ASGI middleware:**
+  - rejects requests with a missing, wrong or stale (over 60 s) signature;
+  - finds or creates the person's `Contexto`, rebuilding it when the key version
+    changes;
+  - sets the ContextVar.
+- **Registry limits:**
+  - at most 6 live contexts, with the least recently used closed first;
+  - each context closes after 30 minutes idle;
+  - DuckDB is limited to 128 MB per person.
+
+  These are start values; the builder measures them.
+- **Redaction:** the redactor masks that person's secrets, the shared secrets,
+  **and every other live context's keys and tokens.**
+- **Transport:**
+  - `stateless_http=True, json_response=True`;
+  - DNS-rebinding protection is on, with the forwarding host in
+    `allowed_hosts`;
+  - the forward allows 240 s per request.
+- **Internal routes:** `/salud` and `/_interno/*` are not reachable through the
+  public `/mcp` route.
+
+### 6.5 Permissions online
+
+- **`AlmacenRemoto`** implements the same interface as `AlmacenLocal`:
+  - `GET /_interno/permisos?email=…` loads the map.
+  - `POST /_interno/permisos` sends corrections, fire-and-forget.
+  - `POST /_interno/escaneo` delivers a finished scan.
+  - Each call carries `Authorization: Bearer <INTERNAL_SECRET>`.
+- **Reloading:** a context reloads its map when `X-Finnegans-Permisos-Version` is
+  newer than the version it holds.
+- **Scans:**
+  - run in the container with the person's token, using the same module as
+    Phase 1;
+  - start when a person is added, when their keys change, or on "Reescanear" in
+    the admin page;
+  - the Durable Object holds the request open so the container doesn't sleep
+    mid-scan;
+  - the report probe follows whatever the Phase 1 spike settled.
+
+### 6.6 Tools online
+
+- 7 tools: no `exportar`.
+- The instructions are the same five rules without "exportar". Rule 3 ends:
   "…trabajá con consultar (SQL); nunca pidas ni muestres todas las filas".
-- The guide topics that mention `exportar` (`clientes.md`, `parametros.md`) get
-  wording that works in both modes, or a line per mode.
-- `verificar_conexion` online checks the person's token, the swagger and the docs,
-  as today. It also reports the scan state: "Permisos escaneados el 17/11: 138
-  reportes y 113 entidades disponibles".
+- The guide topics that mention `exportar` get wording that works in both modes.
+- **Start-up:** measure container start plus the first `buscar_endpoint`.
+  - Over 10 s: warm the swagger in the background at process start.
+  - Still too slow: cache it in KV.
+- **Logging:** HTTP loggers stay at WARNING, the middleware never logs headers,
+  and everything printed goes through the redactor.
 
-### 9.3 Running
+### 6.7 Shared change log
 
-- `transport="streamable-http"`, host `0.0.0.0`, port 8080, path `/mcp`,
-  stateless, with JSON responses.
-- Starlette routes for `/salud` and `/_interno/*`. The internal routes require
-  the signature too.
-- **Start-up:** today the swagger spec (586 paths) is downloaded on first use.
-  - Measure the cold path: container start plus the first `buscar_endpoint`.
-  - If it's over 10 s, warm the swagger in the background at process start.
-  - If that's still not enough, the Worker caches the spec in KV and passes it
-    in.
+The **Worker writes it from the traffic it forwards.** The container returns
+JSON, so the Worker sees every `tools/call` request and its result.
 
-  *(The builder measures and decides.)*
-- **Limits:** responses keep today's cap, `RESPUESTA_MAX_CHARS` = 8,000 chars,
-  far below Claude's per-result limit. Finnegans calls keep their 30 s timeout.
-  The scan has its own 10 s per request.
-- **Logging:** `_LOGGERS_HTTP` stays at WARNING. Container stdout/stderr go to
-  Cloudflare logs, so anything written there goes through the redactor first.
-  The middleware never logs headers.
+- **`escribir`:** the row is awaited before the response goes back.
+  - If D1 fails, it retries once.
+  - If that also fails, the response gets the line "Ojo: el cambio se hizo, pero
+    no quedó registrado en el historial; avisale a {contacto}".
+- **Other tools:** the row is written with `waitUntil`.
+- **Columns:** `cuando`, `email`, `herramienta`, `metodo`, `path`, `codigo`,
+  `resultado`, `filas`, `detalle`.
+  - Writes: the diff plus the assigned code, up to 20,000 chars.
+  - Reads: the path, the params and the row count, **never row data**. The SQL
+    text is kept, up to 2,000 chars.
+  - Everything is redacted first, then cut.
+- **Also logged:** sign-ins, admin actions and scans.
+- **Retention:** 365 days, cleaned up by a daily cron.
+- **Access:** only the admins can read it.
 
-## 10. Audit log ("who did what")
+### 6.8 Rollout
 
-**Written by the Worker, from the traffic it forwards.** The container returns
-JSON responses, so the Worker sees every `tools/call` request (tool name and
-arguments) and its complete result.
+1. **Setup in Rodrigo's account:** D1, KV, Worker secrets and variables. Then
+   the Google OAuth client: External, In production, with the redirect URI for
+   the Worker's callback.
+2. **Juan alone:** checks from the web, Desktop and the phone, read-only.
+3. **The restricted account:** check the filter, the refusal messages, and the
+   **isolation**: two people at the same time each see only their own tables in
+   `SHOW TABLES`.
+4. **First live write:** only with Juan's explicit go.
+5. **Rodrigo, then the team.** If the plan is Team or Enterprise, an Owner adds
+   the connector for the organization.
 
-- **`escribir`:** the audit row is **awaited before the response goes back to
-  Claude**.
-  - If D1 fails, the Worker retries once.
-  - If that also fails, the result goes back with an added line ("Ojo: el cambio
-    se hizo, pero no quedó registrado en el historial; avisale a {contacto}"),
-    and the failure is logged.
-  - A change is never silently missing from the log.
-- **Other tools:** the row is written with `waitUntil`, so it adds no delay.
-- **Redaction:** the result text was already redacted by the container. The
-  Worker applies the same redact-then-truncate rule again, with the secrets it
-  knows (the person's keys, the swagger key, the docs keys), before storing
-  anything.
+### 6.9 Cost
 
-D1 table `auditoria`:
+This assumes one `basic` container, awake about 240 h a month (working hours
+plus the idle tails), for about 15 people.
 
-| Column | Holds |
+| Item | Extra on top of the $5 plan |
 |---|---|
-| `id` | row id |
-| `cuando` | time, UTC |
-| `email` | who |
-| `herramienta` | which tool |
-| `metodo` | HTTP method |
-| `path` | Finnegans path |
-| `codigo` | record code |
-| `resultado` | `ok` \| `denegado` \| `error` |
-| `filas` | row count, for reads |
-| `detalle` | see below |
+| Memory | ≈ $1.95 |
+| Disk | ≈ $0.20 |
+| CPU | within the included amount |
+| Worker, Durable Object, D1, KV, logs, egress | within the included amounts |
+| **Total** | **≈ $2–3/month** |
 
-What goes in `detalle`:
+Each extra hour awake costs about $0.01. `standard-1` would be about $8 extra.
 
-- **`escribir`:** the diff that `escribir` already produces, plus the code
-  Finnegans assigned, cut to 20,000 chars after redaction.
-- **Reads:** for `leer`, `consultar`, `ver_endpoint` and `buscar_endpoint`, the
-  tool, path, params (redacted) and row count. **Never row data.** The SQL of
-  `consultar` is kept, cut to 2,000 chars after redaction.
-- **Other events:** sign-ins, admin actions (add, replace keys, rescan, remove)
-  and scans are logged too, with `herramienta` set to `acceso`, `admin` or
-  `escaneo`.
+### 6.10 Phase 2 testing
 
-Rows are kept for 365 days. A daily Worker cron deletes older ones. Only the
-admins can read the log, on the admin page.
-
-## 11. Isolation (one shared server)
-
-- **Identity comes from the Worker:** from the verified OAuth props, never from
-  anything the client sends. The Worker strips client-sent `X-Finnegans-*`
-  headers, and the container accepts only signed requests.
-- **One `Contexto` per person**, each with:
-  - its own `FinnegansClient` and token cache;
-  - its own in-memory DuckDB with its own allowed temp dir and
-    `enable_external_access=false` (unchanged);
-  - its own `origen_tabla` and lock.
-- **No tool reads module-level mutable state** except the shared swagger and docs
-  caches, which hold company-wide public metadata, not results.
-- **Every person-specific thing is created inside the `Contexto`.** A review rule
-  for the builder: no new global caches of results.
-- **Removing a person** means:
-  - deny on their next request;
-  - drop their context in the container;
-  - delete their keys, permission map and OAuth grants.
-
-  Their audit rows are kept.
-
-## 12. Repo layout and the desktop extension
-
-```
-src/finnegans_core/            shared + permisos.py (map, scan, refusal classification)
-src/finnegans_mcp/server.py    tools read the current Contexto; crear_servidor(modo=…)
-src/finnegans_mcp/contexto.py  Contexto, the registry (LRU, idle close), the ContextVar
-src/finnegans_mcp/remoto.py    online entry point: HTTP, signature middleware, internal routes, callbacks
-src/finnegans_mcp/__main__.py  desktop entry point (stdio), unchanged behaviour
-remoto/                        Worker + Durable Object (TypeScript), wrangler config, D1 migrations, admin page
-Dockerfile                     container image for the online server (uv, Python 3.12)
-tests/                         Python tests (fakes only)
-remoto/test/                   Worker tests (vitest + Cloudflare's Workers test pool)
-```
-
-- **The desktop extension** stays here and is built from the same code. It keeps
-  all 8 tools and gets every fix.
-  - Tag today's state as `v1.0.2` before the online work starts.
-  - The online version is the one announced to the team. The `.mcpb` stays on
-    the GitHub releases page as a backup.
-- **`.mcpbignore`** excludes `remoto/`, `Dockerfile` and `remoto.py`, so the
-  desktop bundle doesn't grow.
-- **The repo is `formaspublicitarias/finnegans-MCP`**, owned by the company's
-  GitHub organization. The old `JPSformas/finnegans-connector` URL redirects to
-  it.
-- **It's public**, so no secrets, emails, domains, account IDs or the workers.dev
-  subdomain go in committed files. Deployment values live in Wrangler secrets
-  and variables, or in a local, git-ignored override.
-- **Making it private** is Juan's option and doesn't affect the design.
-- **Deploying from GitHub Actions** to Cloudflare, with the Cloudflare token
-  stored in the organization's secrets, is optional and can come later.
-
-## 13. Rollout
-
-1. **Setup.** Juan does this in Rodrigo's Cloudflare account:
-   - the D1 database, the KV namespace, and the Worker secrets and variables;
-   - in either company's Google Cloud: an OAuth client that is External and In
-     production, with scopes `openid email profile` and the redirect URI for the
-     Worker's Google callback.
-2. **Report-probe spike** (§8.2), read-only, with Juan's account.
-3. **Juan alone:**
-   - add himself;
-   - run a scan;
-   - read-only checks from the web, Desktop and the phone.
-4. **Restricted account:** add the account used in the 2026-11-17 test.
-   - Check that search hides what it should and that refusals read well.
-   - **Isolation check:** two people at the same time, each running
-     `consultar("SHOW TABLES")`, each seeing only their own tables.
-5. **First live write:** only with Juan's explicit go, on a record he picks.
-6. **Rodrigo, then the team.**
-   - If the company is on Claude Team or Enterprise, an Owner adds the connector
-     once for the organization.
-   - Otherwise each person adds the URL under Settings → Connectors.
-
-## 14. Cost (estimate, to check after the first month)
-
-Everything runs inside Rodrigo's Workers Paid plan ($5/month). Only the
-container can add to that.
-
-**Assumptions:** one `basic` container (1 GiB memory, 4 GB disk, 1/4 vCPU).
-It's awake during working hours plus the 15-minute idle tail, about
-11 h × 22 days ≈ 240 h a month, and asleep nights and weekends.
-
-| Item | Use per month | Included | Extra cost |
-|---|---|---|---|
-| Container memory | 240 GiB-h | 25 GiB-h | ≈ $1.95 |
-| Container disk | 960 GB-h | 200 GB-h | ≈ $0.20 |
-| Container CPU (active only) | 15 people × 100 calls/day × ~0.5 s ≈ 275 vCPU-min | 375 vCPU-min | $0 |
-| Workers, Durable Object, D1, KV, logs, egress | small | well within | $0 |
-| **Total on top of the $5 plan** | | | **≈ $2–3** |
-
-What moves the number:
-
-- Every extra hour the container stays awake costs about $0.01.
-- A larger instance multiplies the memory line. `standard-1` would be about $8
-  extra.
-- Weekend or late-night use keeps it awake longer.
-
-Pure $0 extra would need the container to be awake no more than about 25 hours a
-month. The admin page shows the month's container hours, so the estimate can be
-checked.
-
-## 15. Testing
-
-**Python** (fakes only):
+**Python:**
 
 - **Isolation:**
-  - Two contexts, A and B, loaded with different tables. A's `SHOW TABLES`,
-    `consultar` and `escribir base` never see B's.
-  - Concurrent requests for A and B, using threads, keep the right context. This
-    proves the ContextVar crosses `anyio.to_thread`.
-  - B's secrets are masked even if they appear in A's output.
-  - Requests without a signature, or with a stale or wrong one, never reach a
-    tool.
-- **Registry:**
-  - LRU eviction and idle close free the DuckDB and its temp dir.
-  - A key-version change rebuilds the context.
-- **Scan:**
-  - the classification for every response shape in §8.2, including timeouts;
-  - the limit of 4 in flight is respected.
-- **Filter:**
-  - `buscar_endpoint` and `ver_endpoint` hide `denegado` paths.
-  - `leer` self-corrects a stale `denegado`.
-  - Write refusals are recorded.
-- **Errors:** the new permission messages, and no 403 retry on "sin permiso".
+  - two contexts with different tables never see each other through
+    `SHOW TABLES`, `consultar` or an `escribir` base;
+  - concurrent threaded requests keep the right context;
+  - another person's secrets are masked.
+- **Signature middleware:** a missing, wrong or stale signature never reaches a
+  tool.
+- **Registry:** LRU and idle close free the DuckDB and its temp dir, and a
+  key-version change rebuilds the context.
+- **`AlmacenRemoto`:** against a fake Worker.
 - **Online mode:**
   - exactly 7 tools;
-  - no "exportar" in any tool description, instruction or guide text shown
-    online.
-- **Redaction:** on audit payloads, a secret split by the cut is still masked.
-- **Desktop mode unchanged:** the current 413 tests still pass.
+  - no "exportar" in any text shown online.
 
 **Worker:**
 
 - **Sign-in:**
-  - a 401 with `resource_metadata` on an unauthenticated `/mcp`;
-  - the metadata fields required by Claude (§5);
-  - an email outside `ALLOWED_DOMAINS`, or not on the list, gets no token;
-  - someone disabled after signing in is denied on their next request.
-- **Headers:**
-  - client-sent `X-Finnegans-*` headers are stripped;
-  - the signature is added.
-- **Admin:** admin routes reject non-admins and requests without the CSRF token.
-- **Keys:** the encryption round-trips, and a mismatched AAD fails.
-- **Callbacks:** `/_interno/*` rejects a missing or wrong bearer.
-- **Audit:** the `escribir` audit row is awaited, and the fallback warning line
-  appears when D1 fails.
+  - a 401 with `resource_metadata`;
+  - the metadata fields Claude requires;
+  - domain and list checks;
+  - someone disabled after signing in is denied.
+- **Headers:** client `X-Finnegans-*` headers are stripped, and the signature is
+  added.
+- **Admin:** admin auth and CSRF.
+- **Keys:** the encryption round-trips, and an AAD mismatch fails.
+- **Callbacks:** `/_interno/*` requires the bearer.
+- **Audit:** the awaited audit row, and its fallback line.
 
-**Live** (manual, §13): connect from claude.ai, Desktop and mobile, run read-only
-checks, and run the two-person isolation check. Writes only with Juan's go.
+**Live:** manual, per §6.8.
 
-## 16. Decisions made in the conversation
+## 7. Approaches considered
 
-- **Sign-in:** company Google accounts from **two domains** (SOUTEX and Formas),
-  which is why the Google client is External. Everyone who'd use it has a
-  company Google account.
-- **Keys:** each person acts with their own Finnegans API keys, loaded by an
-  admin.
-- **Admins:** Juan and Rodrigo.
-- **Hosting:** Rodrigo's Cloudflare account, with Juan as a member.
-- **Writes:** changes allowed from day one, with an audit log.
-- **Approach B:** one shared server, the standard design. Approach A was dropped
-  for cost.
-- **Budget:** stay at or near the $5 plan.
-- **No periodic permission scans:** an initial scan plus manual rescans are
-  enough.
-- **No narrow versions:** permissions narrow what each person sees, and skills
-  guide.
-- **No `exportar` online:** the desktop extension keeps it.
-- **Online is the main version.** The desktop extension stays in this repo and
-  gets the same fixes.
+| Approach | Trade-off | Verdict |
+|---|---|---|
+| **Desktop per person first, then the Python connector in one shared container** | Ships value now at $0, with low risk. Phase 1's permission work and context seam are reused online. Phone access only arrives in Phase 2. | **Chosen** |
+| Straight to online (shared container) | Phone access sooner, but everything lands at once and nothing is usable until the whole Worker, admin and container stack works. | Superseded by the phased roadmap |
+| One container per person | Isolation comes from the design itself, with little refactoring. Costs about $15/month on top for 15 people. | Rejected (cost) |
+| TypeScript rewrite on Workers | $0 extra and no cold start. But it means rewriting about 3,100 lines and 413 tests, analysis of big results gets weaker (SQLite instead of DuckDB), and the write rules have to be re-implemented with no Finnegans test environment. | Rejected |
+| Desktop only, forever | $0 and already exists. No phone or browser, no shared change log, and a manual install per PC. | Kept as Phase 1 and as a backup, not as the end state |
 
-## 17. Calls made by Claude (check these)
+## 8. Calls made by Claude (check these)
 
-- **Access:** only people added on the admin page get in. Others see a "pedile
-  acceso" page.
-- **Container:** a single `basic` container with a 15-minute idle timeout.
-- **Memory per person:** DuckDB at 128 MB each, at most 6 live contexts, and a
-  30-minute idle close per person.
-- **Per-person keys travel per request** in signed internal headers, rather than
-  the container reading D1 itself.
-- **Scans:** reports are scanned in the evening by default until a cheap probe is
-  proven, and live calls self-correct the map.
-- **Audit:**
-  - the Worker writes the log from forwarded traffic, and change rows are
-    awaited;
-  - kept 365 days;
-  - diffs up to 20,000 chars;
-  - no row data from reads.
-- **Admin page sign-in:** the same Google sign-in, rather than Cloudflare Access.
+**Phase 1**
+
+- The swagger key is pre-filled in the bundled `.mcpb` from the local `.env` at
+  pack time, and never committed.
+- Rescanning is `verificar_conexion(reescanear=True)`, not a new tool.
+- The permission map lives in a hash-named JSON file in the user's app-data
+  folder.
+- Reports are learned from use if no cheap probe exists. Full report scans
+  happen only on explicit request, with a warning.
+- Who-did-what is an investigation first: Finnegans may already record it.
+
+**Phase 2**
+
+- **Access:** only people on the admin page's list get in.
+- **The container:**
+  - one `basic` container with a 15-minute idle timeout;
+  - at most 6 live contexts, closed after 30 minutes idle;
+  - DuckDB at 128 MB per person.
+- **Keys** travel per request in signed internal headers.
+- **Change log:** written by the Worker, with change rows awaited. Kept 365 days.
+  Diffs up to 20,000 chars. No row data from reads.
+- **Admin page sign-in:** the same Google sign-in, not Cloudflare Access.
 - **URL:** a workers.dev URL at launch.
-- **Permission errors:** the translation is fixed in the shared core, so the
-  desktop extension benefits too.
 
-## 18. Left to the builder
+## 9. Open decision for Juan
 
-- Whether to use the native Durable Object container API (`ctx.container`) or the
-  `@cloudflare/containers` helper class. Pin versions at plan time.
-- Whether the swagger needs warming or caching (§9.3); measure first.
-- The final per-person DuckDB limit and the cap on live contexts, measured on the
-  `basic` instance.
-- Admin page markup and styling: plain, Spanish, works on a phone.
-- D1 schema details beyond the fields named here.
+- **Documentation keys: personal or shared?** Finnegans documents them as
+  personal: each user has their own in GO → Modificar perfil → Datos
+  personales. Either:
+  - (a) each person types their own, so the form asks for 4 keys;
+  - (b) one company pair is pre-filled like the swagger key, so the form asks
+    for 2.
+
+  Option (b) is simpler for people. Option (a) follows Finnegans' intent and
+  avoids one person's keys being shared with everyone.
+
+## 10. Left to the builder
+
+- **Phase 1:** the exact app-data path on each platform.
+- **Phase 2:**
+  - whether to use `ctx.container` or the `@cloudflare/containers` helper (pin
+    versions at plan time);
+  - whether the swagger needs warming or caching;
+  - the final per-person DuckDB limit and the context cap;
+  - the admin page's markup;
+  - D1 schema details.

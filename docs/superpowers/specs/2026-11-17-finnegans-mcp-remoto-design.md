@@ -625,14 +625,15 @@ remoto/test/                   Worker tests (vitest + Cloudflare's Workers test 
     the GitHub releases page as a backup.
 - **`.mcpbignore`** excludes `remoto/`, `Dockerfile` and `remoto.py`, so the
   desktop bundle doesn't grow.
-- **The repo is public today**, under the `JPSformas` GitHub organization. No
-  secrets, emails, domains, account IDs or the workers.dev subdomain go in
-  committed files. Deployment values live in Wrangler secrets and variables, or
-  in a local, git-ignored override.
-- **Juan may move the repo** to the company's official GitHub organization and
-  make it private. The design doesn't depend on where it lives. A GitHub Actions
-  deploy to Cloudflare, with the Cloudflare token stored in that organization's
-  secrets, is optional and can come later.
+- **The repo is `formaspublicitarias/finnegans-MCP`**, owned by the company's
+  GitHub organization. The old `JPSformas/finnegans-connector` URL redirects to
+  it.
+- **It's public**, so no secrets, emails, domains, account IDs or the workers.dev
+  subdomain go in committed files. Deployment values live in Wrangler secrets
+  and variables, or in a local, git-ignored override.
+- **Making it private** is Juan's option and doesn't affect the design.
+- **Deploying from GitHub Actions** to Cloudflare, with the Cloudflare token
+  stored in the organization's secrets, is optional and can come later.
 
 ## 13. Rollout
 

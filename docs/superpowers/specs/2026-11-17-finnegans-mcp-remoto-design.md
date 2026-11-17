@@ -165,7 +165,7 @@ Each person enters only what is personal. The form changes as follows:
 | Client ID de Finnegans | required | required, personal |
 | Client secret de Finnegans | required | required, personal |
 | Clave del swagger | required | **pre-filled** in the build uploaded to the organization (see below); hidden under "avanzado" |
-| Docs client ID / secret | required | **open decision, see §9** |
+| Docs client ID / secret | required | required, **personal** (each person's own, from Finnegans GO → Modificar perfil → Datos personales) |
 | Carpeta de exportación | optional | unchanged |
 
 **Pre-filling the swagger key.** It's a company-wide, read-only documentation
@@ -196,6 +196,7 @@ Contexto
   origen_tabla  where each table came from
   candado       RLock for DuckDB
   permisos      Permisos (the map, see 5.3–5.4)
+  docs          DocsMcp (this person's docs keys)
 ```
 
 - A `contextvars.ContextVar` holds the current `Contexto`. Every tool reads it at
@@ -204,8 +205,11 @@ Contexto
   `Settings.from_env()`. Behaviour is identical to today.
 - **Phase 2 adds** a registry that finds or creates the `Contexto` per signed-in
   person (§6.4). Nothing in the tools changes.
-- `SwaggerCatalog` and `DocsMcp` stay shared at process level. They hold
-  company-wide metadata, not results.
+- `SwaggerCatalog` stays shared at process level: it uses the company swagger
+  key and holds company-wide metadata, not results.
+- `DocsMcp` uses each person's own docs keys (§9), so it lives in the
+  `Contexto`. Its search results are company-wide documentation, so caching
+  them across people is allowed if it's ever needed.
 - The mode (`escritorio` | `remoto`) is a parameter of `crear_servidor`. It
   decides:
   - the tool set (`exportar` only on the desktop);
@@ -478,8 +482,9 @@ custom domain, if any, comes before the team rollout. *(Builder's call.)*
   - A `clave_version` column allows rotation.
 - **Shared secrets:** Worker secrets only. The container receives the shared
   Finnegans keys and `INTERNAL_SECRET` as env vars at start.
-- **Docs keys:** whatever §9 decides for Phase 1 applies here too. If they're
-  personal, they're stored per person like the API keys.
+- **Docs keys are personal** (§9). They're stored encrypted per person, like the
+  API keys. `DocsMcp` becomes part of the per-person `Contexto` instead of being
+  shared, and only `SwaggerCatalog` stays process-wide.
 
 ### 6.4 Worker → container
 
@@ -666,17 +671,14 @@ Each extra hour awake costs about $0.01. `standard-1` would be about $8 extra.
 - **Admin page sign-in:** the same Google sign-in, not Cloudflare Access.
 - **URL:** a workers.dev URL at launch.
 
-## 9. Open decision for Juan
+## 9. Decided after the reorganization
 
-- **Documentation keys: personal or shared?** Finnegans documents them as
-  personal: each user has their own in GO → Modificar perfil → Datos
-  personales. Either:
-  - (a) each person types their own, so the form asks for 4 keys;
-  - (b) one company pair is pre-filled like the swagger key, so the form asks
-    for 2.
-
-  Option (b) is simpler for people. Option (a) follows Finnegans' intent and
-  avoids one person's keys being shared with everyone.
+- **Documentation keys are personal.** Each person enters their own docs client
+  ID and secret key, from Finnegans GO → Modificar perfil → Datos personales.
+  That makes four personal keys in the form, plus the pre-filled swagger key.
+  The form's help text tells people exactly where to find each key. In Phase 2,
+  the docs keys are stored and encrypted per person, like the API keys, and
+  passed per request alongside them.
 
 ## 10. Left to the builder
 

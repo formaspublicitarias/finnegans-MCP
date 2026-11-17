@@ -650,8 +650,8 @@ Each extra hour awake costs about $0.01. `standard-1` would be about $8 extra.
 
 **Phase 1**
 
-- The swagger key is pre-filled in the bundled `.mcpb` from the local `.env` at
-  pack time, and never committed.
+- The swagger key is pre-filled in the bundled `.mcpb` from an environment
+  variable at pack time, and never committed.
 - Rescanning is `verificar_conexion(reescanear=True)`, not a new tool.
 - The permission map lives in a hash-named JSON file in the user's app-data
   folder.

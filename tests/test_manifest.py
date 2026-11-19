@@ -52,6 +52,19 @@ def test_manifest_y_settings_coinciden():
     assert config["carpeta_exportacion"]["default"] == "${DOCUMENTS}/Finnegans"
 
 
+def test_textos_de_claves_personales_sin_nombres():
+    config = MANIFEST["user_config"]
+    for clave in ("client_id", "client_secret", "docs_client_id", "docs_secret_key", "swagger_key"):
+        assert "Juan" not in config[clave]["description"], clave
+    assert "Modificar perfil" in config["docs_client_id"]["description"]
+    assert "Modificar perfil" in config["docs_secret_key"]["description"]
+
+
+def test_manifest_versionado_no_trae_clave_del_swagger():
+    assert "default" not in MANIFEST["user_config"]["swagger_key"]
+    assert MANIFEST["user_config"]["swagger_key"]["required"] is True
+
+
 def test_manifest_arranca_con_uv_y_python_312():
     server = MANIFEST["server"]
     assert MANIFEST["manifest_version"] == "0.4"
@@ -91,6 +104,7 @@ def test_version_igual_en_manifest_pyproject_y_servidor():
     pyproject = tomllib.loads((RAIZ / "pyproject.toml").read_text(encoding="utf-8"))
     assert MANIFEST["version"] == pyproject["project"]["version"] == __version__
     assert re.fullmatch(r"\d+\.\d+\.\d+", __version__)
+    assert __version__ == "1.1.0"
 
     async def _server_info():
         async with Client(crear_servidor(Settings())) as cliente:

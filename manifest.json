@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "finnegans",
   "display_name": "Finnegans",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "Consultá y modificá datos de Finnegans desde Claude, en lenguaje natural.",
   "long_description": "Conecta Claude con la API de Finnegans: busca el endpoint correcto, lee datos, los consulta con SQL, los exporta a Excel o CSV y, cuando se lo pedís, escribe cambios. Las lecturas y las escrituras son herramientas separadas para que Claude Desktop pida permiso antes de modificar algo.",
   "author": {
@@ -59,40 +59,40 @@
     },
     {
       "name": "verificar_conexion",
-      "description": "Comprueba las claves y la conexión, y dice cuál falla."
+      "description": "Revisa la configuración de la extensión: que estén todas las claves, que Finnegans dé un token, que cargue el swagger y que responda la documentación. Dice en castellano qué clave está mal. Con reescanear=True revisa de nuevo qué reportes y entidades puede usar tu usuario."
     }
   ],
   "user_config": {
     "client_id": {
       "type": "string",
       "title": "Client ID de Finnegans",
-      "description": "Identificador de la aplicación en Finnegans. Te lo pasa Juan Sbatella.",
+      "description": "Tu Client ID de la API de Finnegans (te lo da quien administra Finnegans).",
       "required": true
     },
     "client_secret": {
       "type": "string",
       "title": "Client secret de Finnegans",
-      "description": "Clave secreta de la aplicación en Finnegans. Te la pasa Juan Sbatella.",
+      "description": "Tu Client secret de la API de Finnegans (te lo da quien administra Finnegans).",
       "sensitive": true,
       "required": true
     },
     "swagger_key": {
       "type": "string",
-      "title": "Clave del swagger",
-      "description": "Clave para consultar el catálogo de endpoints. Te la pasa Juan Sbatella.",
+      "title": "Clave del swagger (avanzado)",
+      "description": "Clave de la empresa para el catálogo de endpoints. Si ya viene cargada, no la cambies.",
       "sensitive": true,
       "required": true
     },
     "docs_client_id": {
       "type": "string",
       "title": "Client ID de la documentación",
-      "description": "Identificador para acceder a la documentación de la API. Te lo pasa Juan Sbatella.",
+      "description": "Tu Client ID de la documentación: en Finnegans GO, Modificar perfil → Datos personales, al final del formulario.",
       "required": true
     },
     "docs_secret_key": {
       "type": "string",
       "title": "Secret key de la documentación",
-      "description": "Clave secreta para acceder a la documentación de la API. Te la pasa Juan Sbatella.",
+      "description": "Tu Secret key de la documentación: en Finnegans GO, Modificar perfil → Datos personales, al final del formulario.",
       "sensitive": true,
       "required": true
     },

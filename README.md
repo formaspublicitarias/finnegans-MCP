@@ -110,7 +110,14 @@ Requisitos: Python 3.12 o superior, [uv](https://docs.astral.sh/uv/) y Node.js
 ```bash
 uv sync                          # instala dependencias
 uv run pytest                    # corre los tests
-npx @anthropic-ai/mcpb pack . finnegans.mcpb   # genera el instalable
+```
+
+Para generar el instalable usá el script de empaquetado. La clave del swagger
+de la empresa se toma de la variable de entorno `FINNEGANS_SWAGGER_KEY` (nunca
+de un archivo) y queda precargada solo en el paquete, no en el repo:
+
+```bash
+FINNEGANS_SWAGGER_KEY=... uv run python scripts/empaquetar.py [--salida finnegans.mcpb]
 ```
 
 - `src/finnegans_core/`: la lógica (cliente de Finnegans, catálogo, tablas de

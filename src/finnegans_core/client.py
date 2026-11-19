@@ -19,6 +19,7 @@ from .secretos import Redactor
 
 TTL_TOKEN_SEGUNDOS = 3600
 TIMEOUT_SEGUNDOS = 30
+_LIMITE_SONDEO = 2048
 
 
 class FinnegansError(Exception):
@@ -151,3 +152,36 @@ class FinnegansClient:
             return resp.json()
         except ValueError:
             return resp.text
+
+    # -------------------------------------------------------------- sondeo
+    def sondear(
+        self,
+        path: str,
+        id: str | None = None,
+        params: dict | None = None,
+        timeout: float = 10.0,
+    ) -> tuple[int | None, str]:
+        """GET suave para el escaneo de permisos: (status, texto redactado).
+
+        Lee como mucho 2048 bytes y cierra. No reintenta ni levanta
+        FinnegansError: un timeout o un fallo de transporte da (None, "").
+        """
+        try:
+            base = self._base(FinnegansError)
+            ruta = f"/api/{path.strip('/')}"
+            if id is not None:
+                ruta += f"/{quote(str(id), safe='')}"
+            query = dict(params or {})
+            query["ACCESS_TOKEN"] = self.token()
+            crudo = b""
+            with self.http.stream("GET", base + ruta, params=query, timeout=timeout,
+                                  headers={"Accept": "application/json"}) as resp:
+                status = resp.status_code
+                for trozo in resp.iter_bytes():
+                    crudo += trozo
+                    if len(crudo) >= _LIMITE_SONDEO:
+                        break
+        except (FinnegansError, httpx2.HTTPError, httpx2.InvalidURL, OSError, ValueError):
+            return None, ""
+        texto = crudo[:_LIMITE_SONDEO].decode("utf-8", errors="replace")
+        return status, self._detalle(texto, _LIMITE_SONDEO)

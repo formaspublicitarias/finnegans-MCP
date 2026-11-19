@@ -286,3 +286,37 @@ def test_403_comun_sigue_reintentando_una_vez():
     with pytest.raises(FinnegansError):
         _cliente(h).request("GET", "cliente")
     assert cuenta == {"token": 2, "get": 2}
+
+
+def test_sondear_devuelve_status_y_corta_el_cuerpo():
+    cuenta = {"token": 0}
+    vistos = []
+
+    def h(req):
+        if req.url.path == "/api/oauth/token":
+            cuenta["token"] += 1
+            return httpx2.Response(200, text="abc")
+        vistos.append(req)
+        return httpx2.Response(403, text="x" * 5000)
+
+    c = _cliente(h)
+    status, texto = c.sondear("reports/X", params={"PARAM_A": "1"})
+    assert status == 403
+    assert 0 < len(texto) <= 2048
+    assert vistos[0].url.params["ACCESS_TOKEN"] == "abc"
+    assert vistos[0].url.params["PARAM_A"] == "1"
+    assert cuenta["token"] == 1 and len(vistos) == 1  # sin reintento
+
+    s2, t2 = _cliente(lambda req: httpx2.Response(
+        200, text="abc" if req.url.path == "/api/oauth/token" else f"hola {SECRETO} fin"
+    )).sondear("cliente", id="ZZ-NOEXISTE")
+    assert s2 == 200 and SECRETO not in t2 and "hola" in t2
+
+
+def test_sondear_timeout_da_none():
+    def h(req):
+        if req.url.path == "/api/oauth/token":
+            return httpx2.Response(200, text="abc")
+        raise httpx2.ReadTimeout("lento", request=req)
+
+    assert _cliente(h).sondear("reports/X") == (None, "")

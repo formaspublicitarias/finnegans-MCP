@@ -585,3 +585,39 @@ def test_error_http_del_swagger_redacta_antes_de_cortar():
         cat.spec()
     for k in range(3, len(key) + 1):
         assert key[:k] not in str(e.value), k
+
+
+def test_recursos_lista_reportes_y_entidades():
+    from tests.mcp.conftest import SPEC as SPEC_MCP
+    assert sorted(_catalogo_de(SPEC_MCP["paths"], SPEC_MCP["tags"]).recursos()) == [
+        ("cliente", "entidad"),
+        ("reports/ACOrdenesCompraPendientes", "reporte"),
+    ]
+
+
+def test_recursos_del_spec_completo_omite_otro_y_lo_que_no_es_entidad_real(cat):
+    assert sorted(cat.recursos()) == [
+        ("cliente", "entidad"),
+        ("movimientoFondos", "entidad"),
+        ("reports/ACOrdenesCompraPendientes", "reporte"),
+        ("reports/analisisFacturaVenta", "reporte"),
+    ]
+
+
+def test_recursos_deduplica_y_omite_lo_sin_tag_o_de_otro_tipo():
+    tags = [
+        {"name": "cliente", "description": "Tipo: EntidadVO"},
+        {"name": "Rep", "description": "Tipo: Viewer"},
+        {"name": "misc", "description": "Tipo: Otro"},
+    ]
+    paths = {
+        "/cliente": {"post": _op(["cliente"])},
+        "/cliente/{codigo}": {"get": _op(["cliente"])},
+        "/Cliente/list": {"get": _op(["cliente"])},
+        "/reports/Rep": {"get": _op(["Rep"])},
+        "/reports/rep": {"get": _op(["Rep"])},
+        "/misc": {"get": _op(["misc"])},
+        "/sintag": {"get": _op([])},
+    }
+    cat = _catalogo_de(paths, tags)
+    assert sorted(cat.recursos()) == [("cliente", "entidad"), ("reports/Rep", "reporte")]

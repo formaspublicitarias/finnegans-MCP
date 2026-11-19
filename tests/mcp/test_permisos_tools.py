@@ -174,7 +174,13 @@ async def test_reescanear_arranca_y_no_duplica(armar):
     assert env.permisos.estado_texto().startswith("Permisos revisados el")
 
 
-async def test_reescanear_con_reportes_avisa(armar):
+AVISO_REPORTES = (
+    "Ojo: revisar los reportes los ejecuta en Finnegans (unos 140); conviene hacerlo "
+    "fuera del horario de trabajo. Si igual querés hacerlo, pedímelo de nuevo confirmando."
+)
+
+
+async def test_reescanear_con_reportes_sin_confirmar_no_arranca_nada(armar):
     pedidos: list[bool] = []
 
     def escaneo(ctx, incluir_reportes):
@@ -184,12 +190,142 @@ async def test_reescanear_con_reportes_avisa(armar):
     env = armar(hacer_escaneo=escaneo)
     out = await env.llamar("verificar_conexion", reescanear=True, incluir_reportes=True)
     assert env.permisos.esperar_escaneo(5)
+    assert pedidos == []
+    assert env.permisos.estado == "sin_escanear"
+    assert AVISO_REPORTES in out
+    assert "Estoy revisando" not in out and "Ya estoy revisando" not in out
+
+
+async def test_reescanear_con_reportes_confirmado_arranca_con_reportes(armar):
+    pedidos: list[bool] = []
+
+    def escaneo(ctx, incluir_reportes):
+        pedidos.append(incluir_reportes)
+        return {"reports/acordenescomprapendientes": ("permitido", "reporte"),
+                "cliente": ("permitido", "entidad")}
+
+    env = armar(hacer_escaneo=escaneo)
+    out = await env.llamar("verificar_conexion", reescanear=True, incluir_reportes=True,
+                           confirmar=True)
+    assert env.permisos.esperar_escaneo(5)
     assert pedidos == [True]
-    if not REPORTES_EN_ESCANEO_AUTOMATICO:
-        assert (
-            "Ojo: revisar los reportes los ejecuta en Finnegans (unos 140); conviene "
-            "hacerlo fuera del horario de trabajo."
-        ) in out
+    assert "Estoy revisando tus permisos, tarda unos 2 minutos." in out
+    assert "Ojo:" not in out
+    assert "1 de 1 reportes y 1 de 1 entidades disponibles" in env.permisos.estado_texto()
+
+
+async def test_reescanear_con_reportes_confirmado_mientras_corre_otro(armar):
+    liberar = threading.Event()
+    pedidos: list[bool] = []
+
+    def escaneo(ctx, incluir_reportes):
+        pedidos.append(incluir_reportes)
+        assert liberar.wait(5)
+        return {}
+
+    env = armar(hacer_escaneo=escaneo)
+    try:
+        await env.llamar("verificar_conexion", reescanear=True)
+        out = await env.llamar("verificar_conexion", reescanear=True, incluir_reportes=True,
+                               confirmar=True)
+    finally:
+        liberar.set()
+    assert env.permisos.esperar_escaneo(5)
+    assert "Ya estoy revisando tus permisos; en un par de minutos está listo." in out
+    assert pedidos == [REPORTES_EN_ESCANEO_AUTOMATICO]
+
+
+async def test_descripcion_de_verificar_conexion_y_manifest(armar):
+    import json
+    from pathlib import Path
+
+    esperado = (
+        "Revisa la configuración de la extensión: que estén todas las claves, que "
+        "Finnegans dé un token, que cargue el swagger y que responda la documentación. "
+        "Dice en castellano qué clave está mal. Con reescanear=True revisa de nuevo qué "
+        "entidades puede usar tu usuario; los reportes solo si se pide "
+        "incluir_reportes=True y confirmar=True."
+    )
+    env = armar()
+    tools = {t.name: t for t in await env.server.list_tools()}
+    assert tools["verificar_conexion"].description == esperado
+    manifest = json.loads(
+        (Path(__file__).parents[2] / "manifest.json").read_text(encoding="utf-8"))
+    (decl,) = [t for t in manifest["tools"] if t["name"] == "verificar_conexion"]
+    assert decl["description"] == esperado
+
+
+# ------------------------------------------- lo aprendido por uso y los reescaneos
+
+
+def permisos_con_lo_aprendido() -> Permisos:
+    p = Permisos(AlmacenMemoria())
+    p.registrar_lectura("reports/X", ok=False)
+    p.registrar_escritura_denegada("cliente")
+    return p
+
+
+async def test_reescanear_olvida_lo_aprendido_por_uso(armar):
+    p = permisos_con_lo_aprendido()
+    env = armar(permisos=p, hacer_escaneo=lambda ctx, incl: {"cliente": ("permitido", "entidad")})
+    await env.llamar("verificar_conexion", reescanear=True)
+    assert p.esperar_escaneo(5)
+    assert not p.denegado("reports/X")
+    assert not p.solo_lectura("cliente")
+
+
+async def test_escaneo_al_iniciar_conserva_lo_aprendido_por_uso(armar):
+    p = permisos_con_lo_aprendido()
+    env = armar(permisos=p, hacer_escaneo=lambda ctx, incl: {"cliente": ("permitido", "entidad")},
+                escanear_al_iniciar=True)
+    assert p.esperar_escaneo(5)
+    assert env.permisos.estado == "listo"
+    assert p.denegado("reports/X")
+    assert p.solo_lectura("cliente")
+
+
+async def test_escritura_aceptada_quita_solo_lectura(armar):
+    def handler(metodo, path, id, params, body):
+        return {} if metodo == "PUT" else {"Codigo": "1", "Nombre": "x"}
+
+    p = permisos_con_lo_aprendido()
+    env = armar(handler, permisos=p)
+    out = await env.llamar("escribir", metodo="PUT", path="cliente", id="1",
+                           body={"Codigo": "1", "Nombre": "x"})
+    assert "listo, Finnegans aceptó la escritura" in out
+    assert not p.solo_lectura("cliente")
+    assert p.denegado("reports/X")
+
+
+# ------------------------------------------- escaneo al iniciar y primer fallo
+
+
+@pytest.mark.parametrize("falta", ["client_id", "client_secret"])
+async def test_al_iniciar_no_escanea_sin_claves(armar, tmp_path, falta):
+    pedidos: list[bool] = []
+
+    def escaneo(ctx, incluir_reportes):
+        pedidos.append(incluir_reportes)
+        return {}
+
+    env = armar(settings=ajustes(tmp_path, **{falta: ""}), hacer_escaneo=escaneo,
+                escanear_al_iniciar=True)
+    assert env.permisos.esperar_escaneo(5)
+    assert pedidos == []
+    assert env.permisos.estado == "sin_escanear"
+
+
+async def test_primer_escaneo_fallido_lo_dice_en_verificar_conexion(armar):
+    def escaneo(ctx, incluir_reportes):
+        raise RuntimeError("se cayo la red")
+
+    env = armar(hacer_escaneo=escaneo)
+    await env.llamar("verificar_conexion", reescanear=True)
+    assert env.permisos.esperar_escaneo(5)
+    out = await env.llamar("verificar_conexion")
+    assert (
+        "Permisos: la revisión falló y todavía no hay una anterior; por ahora se muestra todo"
+    ) in out
 
 
 async def test_falla_del_swagger_en_el_escaneo_conserva_el_mapa(armar):

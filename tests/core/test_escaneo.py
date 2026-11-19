@@ -114,3 +114,58 @@ def test_una_excepcion_en_un_objetivo_lo_deja_desconocido_y_sigue():
         "b": ("permitido", "entidad"),
         "reports/malo": ("desconocido", "reporte"),
     }
+
+
+# ------------------------------------------- final review: escaneo incompleto
+
+
+class SondaPorPath:
+    """Responde segun el path; None simula que Finnegans no contesto."""
+
+    def __init__(self, respuestas):
+        self.respuestas = respuestas
+
+    def sondear(self, path, id=None, params=None, timeout=10.0):
+        return self.respuestas.get(path, (404, "no existe"))
+
+
+def _entidades(n):
+    return [(f"ent{i}", "entidad") for i in range(n)]
+
+
+def test_muchas_entidades_sin_respuesta_cortan_el_escaneo():
+    from finnegans_core.escaneo import EscaneoIncompleto
+
+    # 2 de 7 sin respuesta: mas del 25%.
+    sonda = SondaPorPath({"ent0": (None, ""), "ent1": (None, "")})
+    with pytest.raises(EscaneoIncompleto) as exc:
+        Escaner(sonda).escanear(_entidades(7), incluir_reportes=False)
+    assert str(exc.value) == (
+        "El escaneo no pudo completarse: Finnegans no respondió a muchas consultas."
+    )
+
+
+def test_hasta_un_cuarto_sin_respuesta_sigue():
+    # 1 de 4 sin respuesta: justo el 25%, no mas.
+    sonda = SondaPorPath({"ent0": (None, "")})
+    res = Escaner(sonda).escanear(_entidades(4), incluir_reportes=False)
+    assert res["ent0"] == ("desconocido", "entidad")
+    assert res["ent1"] == ("permitido", "entidad")
+
+
+def test_los_reportes_sin_respuesta_no_cuentan():
+    # Un reporte que no contesta esta corriendo: no es un escaneo incompleto.
+    respuestas = {f"reports/R{i}": (None, "") for i in range(10)}
+    sonda = SondaPorPath(respuestas)
+    objetivos = _entidades(2) + [(p, "reporte") for p in respuestas]
+    res = Escaner(sonda).escanear(objetivos, incluir_reportes=True)
+    assert res["reports/r0"] == ("permitido", "reporte")
+    assert res["ent0"] == ("permitido", "entidad")
+
+
+def test_escaneo_incompleto_es_un_error_propio():
+    from finnegans_core.client import FinnegansAuthError
+    from finnegans_core.escaneo import EscaneoIncompleto
+
+    assert issubclass(EscaneoIncompleto, Exception)
+    assert not issubclass(EscaneoIncompleto, FinnegansAuthError)

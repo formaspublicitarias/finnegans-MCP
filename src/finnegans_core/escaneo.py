@@ -20,6 +20,19 @@ REPORTES_EN_ESCANEO_AUTOMATICO = False
 
 ID_INEXISTENTE = "ZZ-NOEXISTE"
 
+# Si mas de esta fraccion de las entidades no contesto, el escaneo no sirve:
+# se descarta entero y queda el mapa anterior.
+MAX_SIN_RESPUESTA = 0.25
+
+
+class EscaneoIncompleto(Exception):
+    """Finnegans no contesto a demasiadas sondas de entidades."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "El escaneo no pudo completarse: Finnegans no respondió a muchas consultas."
+        )
+
 
 def clasificar_reporte(status: int | None, cuerpo: str) -> Acceso:
     """Solo un 403 con el texto de Finnegans es denegado; un timeout es que esta corriendo."""
@@ -47,35 +60,44 @@ class Escaner:
         self.max_en_vuelo = max_en_vuelo
         self.timeout = timeout
 
-    def _sondear(self, path: str, tipo: TipoRecurso) -> tuple[Acceso, TipoRecurso]:
-        """Un fallo de autenticacion corta el escaneo; cualquier otro deja el objetivo desconocido."""
+    def _sondear(self, path: str, tipo: TipoRecurso) -> tuple[Acceso, bool]:
+        """(acceso, contesto). Un fallo de autenticacion corta el escaneo;
+        cualquier otro deja el objetivo desconocido."""
         try:
             return self._clasificar(path, tipo)
         except FinnegansAuthError:
             raise
         except Exception:
-            return "desconocido", tipo
+            return "desconocido", True
 
-    def _clasificar(self, path: str, tipo: TipoRecurso) -> tuple[Acceso, TipoRecurso]:
+    def _clasificar(self, path: str, tipo: TipoRecurso) -> tuple[Acceso, bool]:
         if tipo == "reporte":
             status, cuerpo = self.sonda.sondear(path, params=SONDA_REPORTE, timeout=self.timeout)
-            return clasificar_reporte(status, cuerpo), tipo
+            return clasificar_reporte(status, cuerpo), status is not None
         status, cuerpo = self.sonda.sondear(path, id=ID_INEXISTENTE, timeout=self.timeout)
-        return clasificar_entidad(status, cuerpo), tipo
+        return clasificar_entidad(status, cuerpo), status is not None
 
     def escanear(
         self, objetivos: list[tuple[str, TipoRecurso]], incluir_reportes: bool
     ) -> dict[str, tuple[Acceso, TipoRecurso]]:
         """Claves ya normalizadas con `clave_permiso`, listas para `aplicar_escaneo`.
 
-        Propaga FinnegansAuthError: el escaneo entero falla y el llamador conserva el mapa anterior.
+        Propaga FinnegansAuthError y lanza EscaneoIncompleto si mas de un cuarto
+        de las entidades no contesto (se corto la red): el escaneo entero falla
+        y el llamador conserva el mapa anterior. Los reportes no cuentan: uno
+        que no contesta esta corriendo.
         """
         elegidos = [(p, t) for p, t in objetivos if incluir_reportes or t != "reporte"]
         with ThreadPoolExecutor(max_workers=self.max_en_vuelo) as pool:
             resultados = list(pool.map(lambda o: self._sondear(*o), elegidos))
+        entidades = [contesto for (_, t), (_, contesto) in zip(elegidos, resultados)
+                     if t == "entidad"]
+        sin_respuesta = entidades.count(False)
+        if entidades and sin_respuesta > MAX_SIN_RESPUESTA * len(entidades):
+            raise EscaneoIncompleto()
         salida: dict[str, tuple[Acceso, TipoRecurso]] = {}
-        for (path, _), res in zip(elegidos, resultados):
+        for (path, tipo), (acceso, _) in zip(elegidos, resultados):
             clave = clave_permiso(path)
             if clave:
-                salida[clave] = res
+                salida[clave] = (acceso, tipo)
         return salida

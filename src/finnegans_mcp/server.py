@@ -73,7 +73,7 @@ _REESCANEO_INICIADO = "Estoy revisando tus permisos, tarda unos 2 minutos."
 _REESCANEO_EN_CURSO = "Ya estoy revisando tus permisos; en un par de minutos está listo."
 _AVISO_REPORTES = (
     "Ojo: revisar los reportes los ejecuta en Finnegans (unos 140); conviene hacerlo "
-    "fuera del horario de trabajo."
+    "fuera del horario de trabajo. Si igual querés hacerlo, pedímelo de nuevo confirmando."
 )
 
 HacerEscaneo = Callable[["Contexto", bool], dict[str, tuple[Acceso, TipoRecurso]]]
@@ -351,7 +351,8 @@ def crear_servidor(
     `hacer_escaneo(ctx, incluir_reportes)` revisa los permisos de la persona
     (por defecto sondea Finnegans con su cliente); corre en segundo plano. Con
     `escanear_al_iniciar`, arranca uno si la persona nunca se escaneo o el
-    ultimo escaneo fallo.
+    ultimo escaneo fallo, y tiene Client ID y secret de Finnegans. Ese escaneo
+    conserva lo aprendido por uso; un reescaneo pedido lo olvida.
     """
     if modo != "escritorio":
         raise ValueError(
@@ -386,10 +387,14 @@ def crear_servidor(
                     ctx.permisos = _permisos_por_defecto(ctx.settings)
         return ctx
 
-    def escanear(ctx: Contexto, incluir_reportes: bool) -> bool:
-        """Arranca un escaneo en segundo plano; False si ya habia uno corriendo."""
+    def escanear(ctx: Contexto, incluir_reportes: bool, pedido: bool = False) -> bool:
+        """Arranca un escaneo en segundo plano; False si ya habia uno corriendo.
+
+        Un escaneo `pedido` (reescanear) olvida lo aprendido por uso si termina bien.
+        """
         return ctx.permisos.escanear_en_segundo_plano(
-            lambda: hacer_escaneo(ctx, incluir_reportes))
+            lambda: hacer_escaneo(ctx, incluir_reportes),
+            reportes=incluir_reportes, olvidar_aprendido=pedido)
 
     def error(ctx: Contexto, e: BaseException, api_id: str = "", id: str | None = None) -> str:
         return _mensaje_error(e, ctx.limpiar, api_id, id)
@@ -972,6 +977,8 @@ def crear_servidor(
                 ctx.permisos.registrar_escritura_denegada(path)
             return responder(ctx, f"La escritura {m} {destino} falló.\n{error(ctx, e, path, id)}")
         estado["enviado"] = True
+        # Finnegans la acepto: si estaba marcada de solo lectura, ya no lo es.
+        ctx.permisos.registrar_escritura_ok(path)
 
         if m == "DELETE":
             lineas = [f"Registro eliminado: DELETE {destino} se ejecutó correctamente."]
@@ -1123,7 +1130,8 @@ def crear_servidor(
             "Revisa la configuración de la extensión: que estén todas las claves, que "
             "Finnegans dé un token, que cargue el swagger y que responda la "
             "documentación. Dice en castellano qué clave está mal. Con reescanear=True "
-            "revisa de nuevo qué reportes y entidades puede usar tu usuario."
+            "revisa de nuevo qué entidades puede usar tu usuario; los reportes solo si se "
+            "pide incluir_reportes=True y confirmar=True."
         ),
         annotations=ToolAnnotations(
             title="Verificar conexión", read_only_hint=True, idempotent_hint=True,
@@ -1132,7 +1140,7 @@ def crear_servidor(
         structured_output=False,
     )
     async def verificar_conexion_tool(
-        reescanear: bool = False, incluir_reportes: bool = False
+        reescanear: bool = False, incluir_reportes: bool = False, confirmar: bool = False
     ) -> str:
         ctx = proveedor()
         lineas = ["Verificación de la conexión con Finnegans:"]
@@ -1188,12 +1196,13 @@ def crear_servidor(
             )
 
         if reescanear:
-            if escanear(ctx, incluir_reportes or REPORTES_EN_ESCANEO_AUTOMATICO):
+            if incluir_reportes and not confirmar:
+                # Revisar los reportes los ejecuta en Finnegans: no sin confirmar.
+                lineas.append(_AVISO_REPORTES)
+            elif escanear(ctx, incluir_reportes or REPORTES_EN_ESCANEO_AUTOMATICO, pedido=True):
                 lineas.append(_REESCANEO_INICIADO)
             else:
                 lineas.append(_REESCANEO_EN_CURSO)
-            if incluir_reportes and not REPORTES_EN_ESCANEO_AUTOMATICO:
-                lineas.append(_AVISO_REPORTES)
         lineas.append(f"- {ctx.permisos.estado_texto()}")
         if ctx.permisos.problema_almacen:
             lineas.append(ctx.permisos.problema_almacen)
@@ -1201,7 +1210,9 @@ def crear_servidor(
 
     if escanear_al_iniciar:
         ctx = proveedor()
-        if ctx.permisos.estado in ("sin_escanear", "fallo"):
+        con_claves = bool((ctx.settings.client_id or "").strip()
+                          and (ctx.settings.client_secret or "").strip())
+        if con_claves and ctx.permisos.estado in ("sin_escanear", "fallo"):
             escanear(ctx, REPORTES_EN_ESCANEO_AUTOMATICO)
 
     return server

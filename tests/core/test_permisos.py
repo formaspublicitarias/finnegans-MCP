@@ -128,10 +128,10 @@ class AlmacenContador(AlmacenMemoria):
         super().guardar(mapa)
 
 
-def _almacen_con(resultado, estado=None, cuando="2026-11-17") -> AlmacenContador:
+def _almacen_con(resultado, estado=None, cuando="2026-11-17", reportes=False) -> AlmacenContador:
     almacen = AlmacenContador()
     mapa = almacen.cargar()
-    mapa.aplicar_escaneo(resultado, cuando)
+    mapa.aplicar_escaneo(resultado, cuando, reportes=reportes)
     if estado is not None:
         mapa.estado = estado
     return almacen
@@ -144,7 +144,7 @@ def test_estado_texto_con_numeros():
         "reports/c": ("denegado", "reporte"),
         "cliente": ("permitido", "entidad"),
         "proveedor": ("denegado", "entidad"),
-    })
+    }, reportes=True)
     p = Permisos(almacen)
     assert p.estado_texto(hoy=date(2026, 11, 17)) == (
         "Permisos revisados el 17/11: 2 de 3 reportes y 1 de 2 entidades disponibles"
@@ -251,3 +251,148 @@ def test_problema_almacen_se_reenvia():
 
 def test_esperar_escaneo_sin_escaneo_es_inmediato():
     assert Permisos(AlmacenMemoria()).esperar_escaneo(0)
+
+
+# ------------------------------------------- final review: reescaneo y cobertura
+
+
+def test_reescaneo_explicito_olvida_lo_aprendido_por_uso():
+    m = MapaPermisos()
+    m.aplicar_escaneo({"cliente": ("permitido", "entidad")}, "2026-11-17")
+    m.corregir("reports/y", "denegado")
+    m.corregir("cliente", "denegado")
+    m.marcar_escritura_denegada("cliente")
+    m.aplicar_escaneo({"proveedor": ("permitido", "entidad")}, "2026-11-18", olvidar_uso=True)
+    assert "reports/y" not in m.entradas
+    assert "cliente" not in m.entradas
+    assert not m.denegado("reports/y") and not m.solo_lectura("cliente")
+    assert m.escritura_denegada == set()
+    assert m.acceso("proveedor") == "permitido"
+
+
+def test_reescaneo_explicito_olvida_lo_de_uso_aunque_venga_en_el_resultado():
+    m = MapaPermisos()
+    m.corregir("cliente", "denegado")
+    m.aplicar_escaneo({"cliente": ("permitido", "entidad")}, "2026-11-18", olvidar_uso=True)
+    assert m.entradas["cliente"].fuente == "escaneo"
+    assert m.acceso("cliente") == "permitido"
+
+
+def test_quitar_escritura_denegada():
+    m = MapaPermisos()
+    m.marcar_escritura_denegada("cliente")
+    assert m.quitar_escritura_denegada("/cliente/2956") is True
+    assert not m.solo_lectura("cliente")
+    assert m.quitar_escritura_denegada("cliente") is False
+    assert m.quitar_escritura_denegada("") is False
+
+
+def test_reportes_escaneados_se_marca_y_se_guarda():
+    m = MapaPermisos()
+    assert m.reportes_escaneados is False
+    m.aplicar_escaneo({"cliente": ("permitido", "entidad")}, "2026-11-17")
+    assert m.reportes_escaneados is False
+    m.aplicar_escaneo({"reports/x": ("denegado", "reporte")}, "2026-11-18", reportes=True)
+    assert m.reportes_escaneados is True
+    d = m.a_dict()
+    assert d["reportes_escaneados"] is True
+    assert MapaPermisos.desde_dict(d) == m
+    # Un escaneo posterior sin reportes no borra los reportes ya revisados.
+    m.aplicar_escaneo({"cliente": ("permitido", "entidad")}, "2026-11-19")
+    assert m.reportes_escaneados is True
+
+
+def test_archivo_viejo_sin_reportes_escaneados_es_false():
+    d = MapaPermisos().a_dict()
+    del d["reportes_escaneados"]
+    assert MapaPermisos.desde_dict(d).reportes_escaneados is False
+
+
+def test_reportes_escaneados_invalido_es_error():
+    d = MapaPermisos().a_dict()
+    d["reportes_escaneados"] = "si"
+    with pytest.raises(ValueError):
+        MapaPermisos.desde_dict(d)
+
+
+def test_estado_texto_sin_reportes_escaneados():
+    almacen = _almacen_con({
+        "reports/r": ("denegado", "reporte"),
+        "cliente": ("permitido", "entidad"),
+        "proveedor": ("denegado", "entidad"),
+    })
+    p = Permisos(almacen)
+    assert p.estado_texto(hoy=date(2026, 11, 17)) == (
+        "Permisos revisados el 17/11: 1 de 2 entidades disponibles; los reportes se "
+        "revisan al usarlos."
+    )
+
+
+def test_estado_texto_fallo_sin_revision_anterior():
+    almacen = AlmacenMemoria()
+    almacen.cargar().estado = "fallo"
+    assert Permisos(almacen).estado_texto() == (
+        "Permisos: la revisión falló y todavía no hay una anterior; por ahora se muestra todo"
+    )
+
+
+def test_primer_escaneo_fallido_dice_que_no_hay_anterior():
+    p = Permisos(AlmacenMemoria())
+
+    def hacer():
+        raise RuntimeError("se cayo la red")
+
+    assert p.escanear_en_segundo_plano(hacer)
+    assert p.esperar_escaneo(5)
+    assert p.estado_texto() == (
+        "Permisos: la revisión falló y todavía no hay una anterior; por ahora se muestra todo"
+    )
+
+
+def test_registrar_escritura_ok_quita_solo_lectura_y_guarda_si_cambia():
+    almacen = AlmacenContador()
+    p = Permisos(almacen)
+    p.registrar_escritura_denegada("cliente")
+    assert almacen.guardados == 1
+    p.registrar_escritura_ok("proveedor")
+    assert almacen.guardados == 1
+    p.registrar_escritura_ok("cliente/2956")
+    assert not p.solo_lectura("cliente")
+    assert almacen.guardados == 2
+
+
+def test_escaneo_explicito_olvida_lo_aprendido_y_el_automatico_no():
+    p = Permisos(AlmacenMemoria())
+    p.registrar_lectura("reports/X", ok=False)
+    p.registrar_escritura_denegada("cliente")
+    assert p.escanear_en_segundo_plano(lambda: {"cliente": ("permitido", "entidad")})
+    assert p.esperar_escaneo(5)
+    assert p.denegado("reports/X") and p.solo_lectura("cliente")
+    assert p.escanear_en_segundo_plano(lambda: {"cliente": ("permitido", "entidad")},
+                                       olvidar_aprendido=True)
+    assert p.esperar_escaneo(5)
+    assert not p.denegado("reports/X") and not p.solo_lectura("cliente")
+
+
+def test_escaneo_explicito_fallido_conserva_lo_aprendido():
+    p = Permisos(AlmacenMemoria())
+    p.registrar_lectura("reports/X", ok=False)
+    p.registrar_escritura_denegada("cliente")
+
+    def hacer():
+        raise RuntimeError("se cayo la red")
+
+    assert p.escanear_en_segundo_plano(hacer, olvidar_aprendido=True)
+    assert p.esperar_escaneo(5)
+    assert p.denegado("reports/X") and p.solo_lectura("cliente")
+
+
+def test_escaneo_con_reportes_marca_reportes_escaneados():
+    almacen = AlmacenMemoria()
+    p = Permisos(almacen)
+    assert p.escanear_en_segundo_plano(
+        lambda: {"reports/a": ("permitido", "reporte"), "cliente": ("permitido", "entidad")},
+        reportes=True)
+    assert p.esperar_escaneo(5)
+    assert almacen.cargar().reportes_escaneados is True
+    assert "1 de 1 reportes y 1 de 1 entidades disponibles" in p.estado_texto()

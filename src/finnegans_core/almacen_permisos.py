@@ -52,7 +52,7 @@ class AlmacenLocal:
         try:
             datos = json.loads(self.archivo.read_text(encoding="utf-8"))
             return MapaPermisos.desde_dict(datos)
-        except (OSError, ValueError, TypeError, AttributeError):
+        except Exception:  # noqa: BLE001 - un archivo roto (p. ej. version 1e999) no frena el arranque
             return MapaPermisos()
 
     def guardar(self, mapa: MapaPermisos) -> None:

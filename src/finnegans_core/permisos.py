@@ -105,6 +105,8 @@ class MapaPermisos:
     estado: EstadoEscaneo = "sin_escanear"
     escaneo_fin: str | None = None
     version: int = 0
+    # Si algun escaneo reviso los reportes; si no, solo se conocen por uso.
+    reportes_escaneados: bool = False
 
     def acceso(self, path: str) -> Acceso | None:
         clave = clave_permiso(path)
@@ -118,8 +120,25 @@ class MapaPermisos:
         clave = clave_permiso(path)
         return clave is not None and clave in self.escritura_denegada
 
-    def aplicar_escaneo(self, resultado: dict[str, tuple[Acceso, TipoRecurso]], cuando: str) -> None:
-        """Reemplaza solo las claves del resultado; conserva el resto y escritura_denegada."""
+    def aplicar_escaneo(
+        self,
+        resultado: dict[str, tuple[Acceso, TipoRecurso]],
+        cuando: str,
+        *,
+        reportes: bool = False,
+        olvidar_uso: bool = False,
+    ) -> None:
+        """Reemplaza solo las claves del resultado; conserva el resto.
+
+        Con `olvidar_uso` (un reescaneo pedido) antes se borra lo aprendido por
+        uso y las escrituras rechazadas: un permiso nuevo se ve sin esperar. Con
+        `reportes` el escaneo incluyo los reportes.
+        """
+        if olvidar_uso:
+            self.entradas = {k: e for k, e in self.entradas.items() if e.fuente != "uso"}
+            self.escritura_denegada = set()
+        if reportes:
+            self.reportes_escaneados = True
         for clave, (acceso, tipo) in resultado.items():
             self.entradas[clave] = Entrada(acceso, "escaneo", tipo, cuando)
         self.estado = "listo"
@@ -145,6 +164,13 @@ class MapaPermisos:
         self.escritura_denegada.add(clave)
         return True
 
+    def quitar_escritura_denegada(self, path: str) -> bool:
+        clave = clave_permiso(path)
+        if clave is None or clave not in self.escritura_denegada:
+            return False
+        self.escritura_denegada.discard(clave)
+        return True
+
     def resumen(self) -> tuple[int, int, int, int]:
         """(reportes permitidos, reportes, entidades permitidas, entidades); desconocido cuenta como permitido."""
         reportes = [e for e in self.entradas.values() if e.tipo == "reporte"]
@@ -165,6 +191,7 @@ class MapaPermisos:
             "estado": self.estado,
             "escaneo_fin": self.escaneo_fin,
             "version": self.version,
+            "reportes_escaneados": self.reportes_escaneados,
         }
 
     @classmethod
@@ -182,12 +209,16 @@ class MapaPermisos:
             if estado not in _ESTADOS:
                 raise ValueError("estado invalido")
             fin = d.get("escaneo_fin")
+            reportes = d.get("reportes_escaneados", False)
+            if not isinstance(reportes, bool):
+                raise ValueError("reportes_escaneados invalido")
             return cls(
                 entradas=entradas,
                 escritura_denegada={str(x) for x in d.get("escritura_denegada", [])},
                 estado=estado,
                 escaneo_fin=None if fin is None else str(fin),
                 version=int(d.get("version", 0)),
+                reportes_escaneados=reportes,
             )
         except (KeyError, TypeError, AttributeError) as exc:
             raise ValueError("mapa de permisos invalido") from exc
@@ -249,9 +280,20 @@ class Permisos:
             if estado == "sin_escanear":
                 return "Permisos: todavía no se revisaron"
             if estado == "fallo":
+                if self._mapa.escaneo_fin is None:
+                    return (
+                        "Permisos: la revisión falló y todavía no hay una anterior; por "
+                        "ahora se muestra todo"
+                    )
                 return "Permisos: la última revisión falló; se usa la anterior"
             r, rt, e, et = self._mapa.resumen()
             cuando = _fecha(self._mapa.escaneo_fin) or hoy or date.today()
+            reportes = self._mapa.reportes_escaneados
+        if not reportes:
+            return (
+                f"Permisos revisados el {cuando:%d/%m}: {e} de {et} entidades disponibles; "
+                "los reportes se revisan al usarlos."
+            )
         return (
             f"Permisos revisados el {cuando:%d/%m}: {r} de {rt} reportes y {e} de {et} "
             "entidades disponibles"
@@ -275,28 +317,51 @@ class Permisos:
             if self._mapa.marcar_escritura_denegada(path):
                 self._almacen.guardar(self._mapa)
 
+    def registrar_escritura_ok(self, path: str) -> None:
+        """Una escritura aceptada quita el 'solo lectura' de esa entidad."""
+        with self._candado:
+            if self._mapa.quitar_escritura_denegada(path):
+                self._almacen.guardar(self._mapa)
+
     # ------------------------------------------------------------ escaneo
     def escanear_en_segundo_plano(
-        self, hacer: Callable[[], dict[str, tuple[Acceso, TipoRecurso]]]
+        self,
+        hacer: Callable[[], dict[str, tuple[Acceso, TipoRecurso]]],
+        *,
+        reportes: bool = False,
+        olvidar_aprendido: bool = False,
     ) -> bool:
-        """Corre `hacer` en un hilo aparte. False si ya hay un escaneo corriendo."""
+        """Corre `hacer` en un hilo aparte. False si ya hay un escaneo corriendo.
+
+        `reportes`: el escaneo incluye los reportes. `olvidar_aprendido`: si
+        termina bien, borra lo aprendido por uso (un reescaneo pedido); si
+        falla, se conserva todo.
+        """
         with self._candado:
             if self._hilo is not None and self._hilo.is_alive():
                 return False
             self._mapa.estado = "escaneando"
             hilo = threading.Thread(
-                target=self._escanear, args=(hacer,), name="finnegans-escaneo-permisos",
-                daemon=True,
+                target=self._escanear, args=(hacer, reportes, olvidar_aprendido),
+                name="finnegans-escaneo-permisos", daemon=True,
             )
             self._hilo = hilo
             hilo.start()
         return True
 
-    def _escanear(self, hacer: Callable[[], dict[str, tuple[Acceso, TipoRecurso]]]) -> None:
+    def _escanear(
+        self,
+        hacer: Callable[[], dict[str, tuple[Acceso, TipoRecurso]]],
+        reportes: bool,
+        olvidar_aprendido: bool,
+    ) -> None:
         try:
             resultado = hacer()
             with self._candado:
-                self._mapa.aplicar_escaneo(resultado, date.today().isoformat())
+                self._mapa.aplicar_escaneo(
+                    resultado, date.today().isoformat(), reportes=reportes,
+                    olvidar_uso=olvidar_aprendido,
+                )
                 self._almacen.guardar(self._mapa)
         except Exception:  # noqa: BLE001 - un escaneo fallido conserva el mapa anterior
             with self._candado:

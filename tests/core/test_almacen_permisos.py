@@ -116,3 +116,11 @@ def test_tras_guardado_fallido_cargar_devuelve_el_mapa_nuevo_y_no_deja_tmp(tmp_p
     al.guardar(nuevo)
     assert al.problema is None
     assert AlmacenLocal(tmp_path, CID).cargar() == nuevo
+
+
+def test_version_enorme_da_mapa_vacio(tmp_path):
+    al = AlmacenLocal(tmp_path, CID)
+    al.guardar(_mapa())
+    (archivo,) = tmp_path.iterdir()
+    archivo.write_text('{"version": 1e999}', encoding="utf-8")
+    assert al.cargar() == MapaPermisos()

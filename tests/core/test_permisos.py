@@ -151,6 +151,19 @@ def test_estado_texto_con_numeros():
     )
 
 
+def test_estado_texto_con_parte_de_los_reportes():
+    almacen = _almacen_con({
+        "reports/a": ("permitido", "reporte"),
+        "reports/b": ("denegado", "reporte"),
+        "cliente": ("permitido", "entidad"),
+    }, reportes=False)
+    p = Permisos(almacen)
+    assert p.estado_texto(hoy=date(2026, 11, 17)) == (
+        "Permisos revisados el 17/11: 1 de 2 reportes y 1 de 1 entidades disponibles; "
+        "los demás reportes se revisan al usarlos."
+    )
+
+
 def test_estado_texto_de_cada_estado():
     assert Permisos(AlmacenMemoria()).estado_texto() == "Permisos: todavía no se revisaron"
     fallo = Permisos(_almacen_con({"cliente": ("denegado", "entidad")}, estado="fallo"))
@@ -316,8 +329,8 @@ def test_reportes_escaneados_invalido_es_error():
 
 
 def test_estado_texto_sin_reportes_escaneados():
+    # Sin ningun reporte en el mapa: solo entidades.
     almacen = _almacen_con({
-        "reports/r": ("denegado", "reporte"),
         "cliente": ("permitido", "entidad"),
         "proveedor": ("denegado", "entidad"),
     })

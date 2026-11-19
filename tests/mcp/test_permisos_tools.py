@@ -175,7 +175,7 @@ async def test_reescanear_arranca_y_no_duplica(armar):
 
 
 AVISO_REPORTES = (
-    "Ojo: revisar los reportes los ejecuta en Finnegans (unos 140); conviene hacerlo "
+    "Ojo: revisar el resto de los reportes los ejecuta en Finnegans (unos 80); conviene hacerlo "
     "fuera del horario de trabajo. Si igual querés hacerlo, pedímelo de nuevo confirmando."
 )
 
@@ -243,7 +243,8 @@ async def test_descripcion_de_verificar_conexion_y_manifest(armar):
         "Revisa la configuración de la extensión: que estén todas las claves, que "
         "Finnegans dé un token, que cargue el swagger y que responda la documentación. "
         "Dice en castellano qué clave está mal. Con reescanear=True revisa de nuevo qué "
-        "entidades puede usar tu usuario; los reportes solo si se pide "
+        "reportes y entidades puede usar tu usuario (los reportes que se pueden revisar "
+        "sin ejecutarlos); el resto de los reportes solo si se pide "
         "incluir_reportes=True y confirmar=True."
     )
     env = armar()

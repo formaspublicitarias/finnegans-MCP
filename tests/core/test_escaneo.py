@@ -5,7 +5,8 @@ import pytest
 
 from finnegans_core import escaneo
 from finnegans_core.escaneo import (
-    ID_INEXISTENTE, SONDA_REPORTE, Escaner, clasificar_entidad, clasificar_reporte,
+    ID_INEXISTENTE, Escaner, clasificar_entidad, clasificar_reporte, planificar_reportes,
+    sonda_de_reporte,
 )
 
 
@@ -30,9 +31,64 @@ def test_clasificar_entidad(status, cuerpo, esperado):
     assert clasificar_entidad(status, cuerpo) == esperado
 
 
-def test_valores_conservadores_hasta_el_sondeo_en_vivo():
-    assert SONDA_REPORTE == {}
+def test_los_reportes_caros_no_entran_solos():
+    # Los que solo se pueden revisar ejecutandolos piden confirmacion.
     assert escaneo.REPORTES_EN_ESCANEO_AUTOMATICO is False
+
+
+def _p(nombre, requerido=False):
+    return {"nombre": nombre, "requerido": requerido}
+
+
+def test_sonda_de_reporte_con_requerido_va_sin_parametros():
+    assert sonda_de_reporte([_p("PARAM_Categoria", True), _p("PARAM_Fechadesde")]) == {}
+
+
+def test_sonda_de_reporte_con_rango_invierte_las_fechas():
+    assert sonda_de_reporte([_p("PARAM_Fechadesde"), _p("PARAM_Fechahasta"),
+                             _p("PARAM_Sucursal")]) == {
+        "PARAM_Fechadesde": "2099-01-02", "PARAM_Fechahasta": "2099-01-01"}
+
+
+@pytest.mark.parametrize("parametros", [
+    [], [_p("PARAM_Sucursal")], [_p("PARAM_Fechadesde")],
+])
+def test_sonda_de_reporte_sin_requeridos_ni_rango_es_none(parametros):
+    assert sonda_de_reporte(parametros) is None
+
+
+def test_planificar_reportes_lee_el_swagger(tmp_path):
+    from tests.mcp.conftest import ajustes, catalogo, spec_grande
+
+    plan = planificar_reportes(catalogo(ajustes(tmp_path), spec_grande(2)))
+    # ACOrdenesCompraPendientes solo tiene una fecha opcional; los de spec_grande
+    # tienen PARAM_Filtro0 requerido. Las entidades no aparecen.
+    assert plan == {
+        "reports/acordenescomprapendientes": None,
+        "reports/reporteclientes0000": {},
+        "reports/reporteclientes0001": {},
+    }
+
+
+def test_reportes_baratos_entran_sin_pedirlos_y_los_caros_no():
+    sonda = SondaFalsa(respuesta=(200, "[]"))
+    sondas = {"reports/barato": {}, "reports/rango": {"F_desde": "2099-01-02"},
+              "reports/caro": None}
+    objetivos = [("reports/Barato", "reporte"), ("reports/Rango", "reporte"),
+                 ("reports/Caro", "reporte"), ("reports/SinPlan", "reporte")]
+    res = Escaner(sonda, sondas=sondas).escanear(objetivos, incluir_reportes=False)
+    assert sorted((p, pr) for p, _, pr in sonda.llamadas) == [
+        ("reports/Barato", {}), ("reports/Rango", {"F_desde": "2099-01-02"})]
+    assert sorted(res) == ["reports/barato", "reports/rango"]
+
+
+def test_con_incluir_reportes_entran_tambien_los_caros_sin_parametros():
+    sonda = SondaFalsa(respuesta=(200, "[]"))
+    sondas = {"reports/barato": {}, "reports/caro": None}
+    Escaner(sonda, sondas=sondas).escanear(
+        [("reports/Barato", "reporte"), ("reports/Caro", "reporte")], incluir_reportes=True)
+    assert sorted((p, pr) for p, _, pr in sonda.llamadas) == [
+        ("reports/Barato", {}), ("reports/Caro", {})]
 
 
 class SondaFalsa:
@@ -70,7 +126,7 @@ def test_entidades_usan_codigo_inexistente_y_reportes_la_sonda():
         incluir_reportes=True)
     por_path = {p: (i, pr) for p, i, pr in sonda.llamadas}
     assert por_path["cliente"][0] == ID_INEXISTENTE
-    assert por_path["reports/ACOrdenesCompraPendientes"] == (None, SONDA_REPORTE)
+    assert por_path["reports/ACOrdenesCompraPendientes"] == (None, {})
     # las claves salen normalizadas, no con la grafia del swagger
     assert res == {
         "cliente": ("desconocido", "entidad"),

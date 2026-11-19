@@ -289,6 +289,11 @@ class Permisos:
             r, rt, e, et = self._mapa.resumen()
             cuando = _fecha(self._mapa.escaneo_fin) or hoy or date.today()
             reportes = self._mapa.reportes_escaneados
+        if not reportes and rt:
+            return (
+                f"Permisos revisados el {cuando:%d/%m}: {r} de {rt} reportes y {e} de {et} "
+                "entidades disponibles; los demás reportes se revisan al usarlos."
+            )
         if not reportes:
             return (
                 f"Permisos revisados el {cuando:%d/%m}: {e} de {et} entidades disponibles; "

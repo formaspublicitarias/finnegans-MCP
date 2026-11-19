@@ -59,7 +59,7 @@
     },
     {
       "name": "verificar_conexion",
-      "description": "Revisa la configuración de la extensión: que estén todas las claves, que Finnegans dé un token, que cargue el swagger y que responda la documentación. Dice en castellano qué clave está mal. Con reescanear=True revisa de nuevo qué entidades puede usar tu usuario; los reportes solo si se pide incluir_reportes=True y confirmar=True."
+      "description": "Revisa la configuración de la extensión: que estén todas las claves, que Finnegans dé un token, que cargue el swagger y que responda la documentación. Dice en castellano qué clave está mal. Con reescanear=True revisa de nuevo qué reportes y entidades puede usar tu usuario (los reportes que se pueden revisar sin ejecutarlos); el resto de los reportes solo si se pide incluir_reportes=True y confirmar=True."
     }
   ],
   "user_config": {

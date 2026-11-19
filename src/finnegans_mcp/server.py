@@ -26,7 +26,9 @@ from finnegans_core.catalogo.swagger import Operacion, SwaggerCatalog, SwaggerEr
 from finnegans_core.client import FinnegansAuthError, FinnegansClient, FinnegansError
 from finnegans_core.config import Settings
 from finnegans_core.errores import traducir_error
-from finnegans_core.escaneo import REPORTES_EN_ESCANEO_AUTOMATICO, Escaner
+from finnegans_core.escaneo import (
+    REPORTES_EN_ESCANEO_AUTOMATICO, Escaner, planificar_reportes,
+)
 from finnegans_core.exportar import exportar as exportar_archivo
 from finnegans_core.guia import guia as guia_tema
 from finnegans_core.permisos import (
@@ -72,7 +74,7 @@ _SOLO_LECTURA = "solo lectura para vos"
 _REESCANEO_INICIADO = "Estoy revisando tus permisos, tarda unos 2 minutos."
 _REESCANEO_EN_CURSO = "Ya estoy revisando tus permisos; en un par de minutos está listo."
 _AVISO_REPORTES = (
-    "Ojo: revisar los reportes los ejecuta en Finnegans (unos 140); conviene hacerlo "
+    "Ojo: revisar el resto de los reportes los ejecuta en Finnegans (unos 80); conviene hacerlo "
     "fuera del horario de trabajo. Si igual querés hacerlo, pedímelo de nuevo confirmando."
 )
 
@@ -364,7 +366,8 @@ def crear_servidor(
     swagger = swagger if swagger is not None else SwaggerCatalog(settings)
     if hacer_escaneo is None:
         def hacer_escaneo(ctx: Contexto, incluir_reportes: bool):
-            return Escaner(ctx.client).escanear(swagger.recursos(), incluir_reportes)
+            return Escaner(ctx.client, sondas=planificar_reportes(swagger)).escanear(
+                swagger.recursos(), incluir_reportes)
     if contexto is None:
         contexto = Contexto.desde_settings(settings, client, docs, workspace)
     if isinstance(contexto, Contexto):
@@ -1130,7 +1133,8 @@ def crear_servidor(
             "Revisa la configuración de la extensión: que estén todas las claves, que "
             "Finnegans dé un token, que cargue el swagger y que responda la "
             "documentación. Dice en castellano qué clave está mal. Con reescanear=True "
-            "revisa de nuevo qué entidades puede usar tu usuario; los reportes solo si se "
+            "revisa de nuevo qué reportes y entidades puede usar tu usuario (los reportes "
+            "que se pueden revisar sin ejecutarlos); el resto de los reportes solo si se "
             "pide incluir_reportes=True y confirmar=True."
         ),
         annotations=ToolAnnotations(

@@ -9,6 +9,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from typing import Protocol
 
+from .client import FinnegansAuthError
 from .permisos import Acceso, TipoRecurso, clave_permiso, es_rechazo_permiso
 
 # Salen de la nota docs/superpowers/notas/2026-11-sondeo-permisos.md; se
@@ -47,6 +48,15 @@ class Escaner:
         self.timeout = timeout
 
     def _sondear(self, path: str, tipo: TipoRecurso) -> tuple[Acceso, TipoRecurso]:
+        """Un fallo de autenticacion corta el escaneo; cualquier otro deja el objetivo desconocido."""
+        try:
+            return self._clasificar(path, tipo)
+        except FinnegansAuthError:
+            raise
+        except Exception:
+            return "desconocido", tipo
+
+    def _clasificar(self, path: str, tipo: TipoRecurso) -> tuple[Acceso, TipoRecurso]:
         if tipo == "reporte":
             status, cuerpo = self.sonda.sondear(path, params=SONDA_REPORTE, timeout=self.timeout)
             return clasificar_reporte(status, cuerpo), tipo
@@ -56,7 +66,10 @@ class Escaner:
     def escanear(
         self, objetivos: list[tuple[str, TipoRecurso]], incluir_reportes: bool
     ) -> dict[str, tuple[Acceso, TipoRecurso]]:
-        """Claves ya normalizadas con `clave_permiso`, listas para `aplicar_escaneo`."""
+        """Claves ya normalizadas con `clave_permiso`, listas para `aplicar_escaneo`.
+
+        Propaga FinnegansAuthError: el escaneo entero falla y el llamador conserva el mapa anterior.
+        """
         elegidos = [(p, t) for p, t in objetivos if incluir_reportes or t != "reporte"]
         with ThreadPoolExecutor(max_workers=self.max_en_vuelo) as pool:
             resultados = list(pool.map(lambda o: self._sondear(*o), elegidos))

@@ -320,3 +320,39 @@ def test_sondear_timeout_da_none():
         raise httpx2.ReadTimeout("lento", request=req)
 
     assert _cliente(h).sondear("reports/X") == (None, "")
+
+
+def test_sondear_concurrente_pide_un_solo_token():
+    import threading
+    import time
+
+    cuenta = {"token": 0}
+    lock = threading.Lock()
+
+    def h(req):
+        if req.url.path == "/api/oauth/token":
+            with lock:
+                cuenta["token"] += 1
+            time.sleep(0.05)
+            return httpx2.Response(200, text="abc")
+        return httpx2.Response(404, text="no existe")
+
+    c = _cliente(h)
+    hilos = [threading.Thread(target=c.sondear, args=("cliente", "ZZ")) for _ in range(6)]
+    for t in hilos:
+        t.start()
+    for t in hilos:
+        t.join()
+    assert cuenta["token"] == 1
+
+
+def test_sondear_propaga_el_fallo_de_autenticacion():
+    c = _cliente(lambda req: httpx2.Response(401, text="invalid_client"))
+    with pytest.raises(FinnegansAuthError):
+        c.sondear("cliente", id="ZZ")
+
+
+def test_sondear_propaga_la_direccion_invalida():
+    c = _cliente(lambda req: httpx2.Response(200, text="abc"), FINNEGANS_BASE_URL="api.finneg.com")
+    with pytest.raises(FinnegansAuthError):
+        c.sondear("cliente", id="ZZ")

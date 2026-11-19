@@ -85,3 +85,32 @@ def test_sin_reportes_no_sondea_reportes():
     assert [c[0] for c in sonda.llamadas] == ["cliente"]
     assert list(res) == ["cliente"]
     assert res["cliente"] == ("permitido", "entidad")
+
+
+def test_un_fallo_de_autenticacion_corta_el_escaneo():
+    from finnegans_core.client import FinnegansAuthError
+
+    class Mala:
+        def sondear(self, path, id=None, params=None, timeout=10.0):
+            raise FinnegansAuthError("claves malas")
+
+    with pytest.raises(FinnegansAuthError):
+        Escaner(Mala()).escanear([("cliente", "entidad"), ("reports/X", "reporte")], True)
+
+
+def test_una_excepcion_en_un_objetivo_lo_deja_desconocido_y_sigue():
+    class Rota:
+        def sondear(self, path, id=None, params=None, timeout=10.0):
+            if path in ("malo", "reports/Malo"):
+                raise RuntimeError("boom")
+            return 404, "no existe"
+
+    res = Escaner(Rota()).escanear(
+        [("a", "entidad"), ("malo", "entidad"), ("b", "entidad"), ("reports/Malo", "reporte")],
+        incluir_reportes=True)
+    assert res == {
+        "a": ("permitido", "entidad"),
+        "malo": ("desconocido", "entidad"),
+        "b": ("permitido", "entidad"),
+        "reports/malo": ("desconocido", "reporte"),
+    }

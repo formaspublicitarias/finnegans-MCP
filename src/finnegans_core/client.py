@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from typing import Any
 from urllib.parse import quote
@@ -37,6 +38,7 @@ class FinnegansClient:
         self.redactor = Redactor(settings.secretos())
         self._token: str | None = None
         self._token_ts = 0.0
+        self._token_lock = threading.Lock()
 
     # ---------------------------------------------------------------- util
     def _detalle(self, texto: str, largo: int) -> str:
@@ -95,13 +97,23 @@ class FinnegansClient:
         self.redactor.agregar(token)
         return token
 
+    def _vigente(self) -> bool:
+        return (self._token is not None
+                and (time.monotonic() - self._token_ts) <= TTL_TOKEN_SEGUNDOS)
+
     def token(self, forzar: bool = False) -> str:
-        """Token valido; re-autentica si vencio o se fuerza."""
-        vencido = (time.monotonic() - self._token_ts) > TTL_TOKEN_SEGUNDOS
-        if forzar or self._token is None or vencido:
-            self._token = self._pedir_token()
-            self._token_ts = time.monotonic()
-        return self._token
+        """Token valido; re-autentica si vencio o se fuerza.
+
+        Con lock y doble chequeo: probes concurrentes sobre un cliente nuevo
+        piden un solo token.
+        """
+        if not forzar and self._vigente():
+            return self._token  # type: ignore[return-value]
+        with self._token_lock:
+            if forzar or not self._vigente():
+                self._token = self._pedir_token()
+                self._token_ts = time.monotonic()
+            return self._token  # type: ignore[return-value]
 
     # ------------------------------------------------------------- request
     def request(
@@ -163,11 +175,12 @@ class FinnegansClient:
     ) -> tuple[int | None, str]:
         """GET suave para el escaneo de permisos: (status, texto redactado).
 
-        Lee como mucho 2048 bytes y cierra. No reintenta ni levanta
-        FinnegansError: un timeout o un fallo de transporte da (None, "").
+        Lee como mucho 2048 bytes y cierra. No reintenta. Un timeout o un fallo
+        de transporte da (None, ""); un fallo de autenticacion o de direccion
+        (FinnegansAuthError) se propaga: unas claves malas no son un permiso.
         """
         try:
-            base = self._base(FinnegansError)
+            base = self._base(FinnegansAuthError)
             ruta = f"/api/{path.strip('/')}"
             if id is not None:
                 ruta += f"/{quote(str(id), safe='')}"
@@ -181,7 +194,9 @@ class FinnegansClient:
                     crudo += trozo
                     if len(crudo) >= _LIMITE_SONDEO:
                         break
-        except (FinnegansError, httpx2.HTTPError, httpx2.InvalidURL, OSError, ValueError):
+        except FinnegansAuthError:
+            raise
+        except (httpx2.HTTPError, httpx2.InvalidURL, OSError, ValueError):
             return None, ""
         texto = crudo[:_LIMITE_SONDEO].decode("utf-8", errors="replace")
         return status, self._detalle(texto, _LIMITE_SONDEO)

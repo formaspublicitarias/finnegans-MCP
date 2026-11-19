@@ -1,11 +1,14 @@
 """Helpers puros del sondeo en vivo (sin red, valores falsos)."""
 import importlib.util
+import sys
 from datetime import date
 from pathlib import Path
 
 _RUTA = Path(__file__).resolve().parents[1] / "scripts" / "sondeo_permisos.py"
 _spec = importlib.util.spec_from_file_location("sondeo_permisos", _RUTA)
 sondeo = importlib.util.module_from_spec(_spec)
+# dataclasses busca el modulo en sys.modules mientras se carga.
+sys.modules["sondeo_permisos"] = sondeo
 _spec.loader.exec_module(sondeo)
 
 PARAMS = [
@@ -39,6 +42,57 @@ def test_candidatos_sin_fechas():
     c = sondeo.candidatos([{"nombre": "X", "requerido": True}])
     assert c["b) fechas requeridas invalidas"] == {}
     assert c["c) desde posterior a hasta"] == {}
+
+
+def test_tiene_rango_pide_desde_y_hasta():
+    assert sondeo.tiene_rango(PARAMS)
+    assert not sondeo.tiene_rango([{"nombre": "PARAM_FechaDesde", "requerido": False}])
+    assert not sondeo.tiene_rango([{"nombre": "PARAM_Sucursal", "requerido": False}])
+
+
+def test_censar_reportes_separa_por_requeridos_y_rango():
+    reportes = [
+        ("reports/ConRequerido", [{"nombre": "PARAM_Categoria", "requerido": True}]),
+        ("reports/SinRequeridosConRango", [
+            {"nombre": "PARAM_Fechadesde", "requerido": False},
+            {"nombre": "PARAM_Fechahasta", "requerido": False}]),
+        ("reports/SinNada", []),
+        ("reports/SoloOpcional", [{"nombre": "PARAM_Sucursal", "requerido": False}]),
+    ]
+    c = sondeo.censar_reportes(reportes)
+    assert c.con_requeridos == ["ConRequerido"]
+    assert c.sin_requeridos_con_rango == ["SinRequeridosConRango"]
+    assert c.sin_requeridos_sin_rango == ["SinNada", "SoloOpcional"]
+    assert c.total == 4
+
+
+def test_candidatos_baratos_nunca_sin_parametros():
+    c = sondeo.candidatos_baratos(PARAMS, hoy=date(2026, 11, 19))
+    assert list(c) == ["c) desde posterior a hasta", "d) rango de 1 dia (ayer)"]
+    assert all(c.values())  # ninguno vacio: nunca se llama al reporte sin parametros
+
+
+def test_elegir_para_probar_toma_los_primeros_n():
+    c = sondeo.Censo(con_requeridos=[], sin_requeridos_con_rango=["B", "A", "C"],
+                     sin_requeridos_sin_rango=["Z"])
+    assert sondeo.elegir_para_probar(c, 2) == ["A", "B"]
+    assert sondeo.elegir_para_probar(c, 0) == []
+
+
+def test_censar_lee_solo_el_swagger(tmp_path):
+    from tests.mcp.conftest import SPEC, ajustes, catalogo
+
+    lineas: list[str] = []
+    censo = sondeo.censar(catalogo(ajustes(tmp_path), SPEC), lineas.append)
+    # El reporte de prueba solo tiene PARAM_Fechadesde opcional: sin requeridos ni rango.
+    assert censo.sin_requeridos_sin_rango == ["ACOrdenesCompraPendientes"]
+    assert censo.total == 1
+    assert any("Censo de reportes del swagger (1)" in l for l in lineas)
+
+
+def test_main_sin_claves_no_hace_nada(capsys):
+    assert sondeo.main([], env={}) == 2
+    assert "Faltan variables de entorno" in capsys.readouterr().err
 
 
 def test_campos_de_autoria_solo_nombres():

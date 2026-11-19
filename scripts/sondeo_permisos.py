@@ -23,10 +23,17 @@ Para autoria lee cliente/list y un cliente: imprime solo los NOMBRES de los camp
 que parecen de usuario/modificacion (nunca sus valores) y los paths del swagger que
 parecen de auditoria o historial.
 
+Ademas hace un censo de los reportes del swagger (sin llamar a la API): cuantos
+tienen algun parametro requerido (sondearlos sin parametros es barato: Finnegans
+contesta 400 "is mandatory" sin ejecutar nada), cuantos no tienen requeridos pero
+si un rango de fechas, y cuantos no tienen ninguna de las dos cosas. En los
+primeros N sin requeridos con rango prueba solo (c) y (d): nunca los llama sin
+parametros, porque eso podria ejecutar el reporte entero.
+
 Uso (las claves van por variables de entorno, nunca desde un archivo .env):
 
-    uv run python scripts/sondeo_permisos.py ^
-        --reportes DETALLETRANSACCIONES,OTRO_REPORTE,OTRO_MAS
+    python scripts/sondeo_permisos.py
+    python scripts/sondeo_permisos.py --reportes DETALLETRANSACCIONES --sin-requeridos 4
 
 Sale con codigo distinto de cero si faltan variables de entorno.
 """
@@ -36,6 +43,7 @@ import argparse
 import re
 import sys
 import time
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any, Callable, Mapping
 
@@ -86,6 +94,59 @@ def candidatos(parametros: list[dict], hoy: date | None = None) -> dict[str, dic
         "c) desde posterior a hasta": invertido,
         "d) rango de 1 dia (ayer)": un_dia,
     }
+
+
+def tiene_rango(parametros: list[dict]) -> bool:
+    """True si el reporte tiene un parametro de fecha 'desde' y otro 'hasta'."""
+    nombres = [str(p.get("nombre", "")).lower() for p in parametros_de_fecha(parametros)]
+    return any("desde" in n for n in nombres) and any("hasta" in n for n in nombres)
+
+
+@dataclass
+class Censo:
+    """Nombres de reportes del swagger, separados por como se pueden sondear."""
+
+    con_requeridos: list[str] = field(default_factory=list)
+    sin_requeridos_con_rango: list[str] = field(default_factory=list)
+    sin_requeridos_sin_rango: list[str] = field(default_factory=list)
+
+    @property
+    def total(self) -> int:
+        return (len(self.con_requeridos) + len(self.sin_requeridos_con_rango)
+                + len(self.sin_requeridos_sin_rango))
+
+
+def censar_reportes(reportes: list[tuple[str, list[dict]]]) -> Censo:
+    """Clasifica (path, parametros) de cada reporte.
+
+    Con un parametro requerido, llamarlo sin parametros es barato: Finnegans
+    contesta 400 "is mandatory" sin ejecutar nada (o 403 si no hay permiso).
+    Sin requeridos, una llamada sin parametros puede ejecutar el reporte entero.
+    """
+    censo = Censo()
+    for path, parametros in reportes:
+        nombre = path.strip("/").split("/", 1)[-1]
+        if any(p.get("requerido") for p in parametros):
+            censo.con_requeridos.append(nombre)
+        elif tiene_rango(parametros):
+            censo.sin_requeridos_con_rango.append(nombre)
+        else:
+            censo.sin_requeridos_sin_rango.append(nombre)
+    for lista in (censo.con_requeridos, censo.sin_requeridos_con_rango,
+                  censo.sin_requeridos_sin_rango):
+        lista.sort(key=str.casefold)
+    return censo
+
+
+def candidatos_baratos(parametros: list[dict], hoy: date | None = None) -> dict[str, dict[str, str]]:
+    """Solo los candidatos (c) y (d): nunca se llama al reporte sin parametros."""
+    todos = candidatos(parametros, hoy)
+    return {k: todos[k] for k in ("c) desde posterior a hasta", "d) rango de 1 dia (ayer)")}
+
+
+def elegir_para_probar(censo: Censo, n: int) -> list[str]:
+    """Los primeros n reportes sin requeridos que tienen rango de fechas."""
+    return sorted(censo.sin_requeridos_con_rango, key=str.casefold)[:max(n, 0)]
 
 
 def campos_de_autoria(registro: Any) -> list[str]:
@@ -153,10 +214,50 @@ def sondear_reporte(client: FinnegansClient, catalogo: SwaggerCatalog, nombre: s
         return
     params = ops[0].parametros
     fechas = [p["nombre"] + ("*" if p["requerido"] else "") for p in parametros_de_fecha(params)]
-    salida(f"\n--- {nombre} (parametros de fecha: {fechas or 'ninguno'}) ---")
+    requeridos = [p["nombre"] for p in params if p.get("requerido")]
+    salida(f"\n--- {nombre} (parametros de fecha: {fechas or 'ninguno'}; "
+           f"requeridos segun el swagger: {requeridos or 'ninguno'}) ---")
     for etiqueta, juego in candidatos(params).items():
         estado, seg, cuerpo = _sondear(client, path, juego)
         salida(f"{nombre} | {etiqueta} | HTTP {estado} | {seg:.1f} s | {cuerpo}")
+
+
+def _parametros_get(catalogo: SwaggerCatalog, path: str) -> list[dict] | None:
+    ops = [o for o in catalogo.ver(path) if o.metodo == "GET"]
+    return ops[0].parametros if ops else None
+
+
+def censar(catalogo: SwaggerCatalog, salida: Callable[[str], None]) -> Censo:
+    """Cuenta los reportes del swagger por como se pueden sondear. No llama a la API."""
+    reportes = []
+    for path, tipo in catalogo.recursos():
+        if tipo != "reporte":
+            continue
+        parametros = _parametros_get(catalogo, path)
+        if parametros is not None:
+            reportes.append((path, parametros))
+    censo = censar_reportes(reportes)
+    salida(f"\n--- Censo de reportes del swagger ({censo.total}) ---")
+    salida(f"Con algun parametro requerido (sondeo sin parametros, barato): "
+           f"{len(censo.con_requeridos)}")
+    salida(f"Sin requeridos, con rango de fechas (se prueba el truco de fechas): "
+           f"{len(censo.sin_requeridos_con_rango)}")
+    salida(f"Sin requeridos ni rango de fechas (se aprenden al usarlos): "
+           f"{len(censo.sin_requeridos_sin_rango)}")
+    salida("Sin requeridos ni rango: " + (", ".join(censo.sin_requeridos_sin_rango) or "ninguno"))
+    return censo
+
+
+def sondear_sin_requeridos(client: FinnegansClient, catalogo: SwaggerCatalog,
+                           nombres: list[str], salida: Callable[[str], None]) -> None:
+    """Prueba solo (c) y (d) en reportes sin requeridos: nunca los llama sin parametros."""
+    for nombre in nombres:
+        path = f"reports/{nombre}"
+        parametros = _parametros_get(catalogo, path) or []
+        salida(f"\n--- {nombre} (sin requeridos; solo candidatos con fechas) ---")
+        for etiqueta, juego in candidatos_baratos(parametros).items():
+            estado, seg, cuerpo = _sondear(client, path, juego)
+            salida(f"{nombre} | {etiqueta} | HTTP {estado} | {seg:.1f} s | {cuerpo}")
 
 
 def sondear_autoria(client: FinnegansClient, catalogo: SwaggerCatalog,
@@ -179,9 +280,14 @@ def sondear_autoria(client: FinnegansClient, catalogo: SwaggerCatalog,
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Sondeo de solo lectura de permisos de reportes y campos de autoria.")
-    p.add_argument("--reportes", required=True, metavar="A,B,C",
-                   help="nombres de reportes pesados separados por coma, "
-                        "por ejemplo DETALLETRANSACCIONES,OTRO,OTRO_MAS")
+    p.add_argument("--reportes", default="", metavar="A,B,C",
+                   help="opcional: reportes puntuales para probar los cuatro candidatos, "
+                        "por ejemplo DETALLETRANSACCIONES,OTRO")
+    p.add_argument("--sin-requeridos", type=int, default=4, metavar="N",
+                   help="cuantos reportes sin parametros requeridos (y con rango de "
+                        "fechas) probar con el truco de fechas (por defecto 4; 0 = ninguno)")
+    p.add_argument("--sin-autoria", action="store_true",
+                   help="no repetir la parte de autoria")
     return p
 
 
@@ -189,9 +295,6 @@ def main(argv: list[str] | None = None, env: Mapping[str, str] | None = None, *,
          salida: Callable[[str], None] = print) -> int:
     args = _parser().parse_args(argv)
     reportes = [r.strip() for r in args.reportes.split(",") if r.strip()]
-    if not reportes:
-        print("Pasá al menos un reporte en --reportes. No se hizo nada.", file=sys.stderr)
-        return 2
     settings = Settings.from_env() if env is None else Settings.from_env(env)
     sin_cargar = settings.faltantes()
     if sin_cargar:
@@ -209,7 +312,11 @@ def main(argv: list[str] | None = None, env: Mapping[str, str] | None = None, *,
     try:
         for nombre in reportes:
             sondear_reporte(client, catalogo, nombre, salida)
-        sondear_autoria(client, catalogo, salida)
+        censo = censar(catalogo, salida)
+        sondear_sin_requeridos(
+            client, catalogo, elegir_para_probar(censo, args.sin_requeridos), salida)
+        if not args.sin_autoria:
+            sondear_autoria(client, catalogo, salida)
     except Exception as e:  # noqa: BLE001
         print(f"\nSONDEO FALLIDO ({type(e).__name__}): {client.redactor.limpiar(str(e))[:300]}",
               file=sys.stderr)

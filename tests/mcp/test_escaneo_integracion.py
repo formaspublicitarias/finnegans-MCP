@@ -21,7 +21,7 @@ from finnegans_core.workspace import Workspace
 from finnegans_mcp.contexto import Contexto
 from finnegans_mcp.server import crear_servidor
 
-from .conftest import SPEC, DocsFalso, ajustes, catalogo
+from .conftest import SPEC, DocsFalso, ajustes, catalogo, spec_grande
 
 pytestmark = pytest.mark.anyio
 
@@ -55,7 +55,7 @@ def espia(monkeypatch):
 def armar_real(tmp_path):
     creados: list[tuple[Contexto, httpx2.Client]] = []
 
-    def _armar(red, almacen: AlmacenMemoria | None = None):
+    def _armar(red, almacen: AlmacenMemoria | None = None, spec: dict = SPEC):
         s = ajustes(tmp_path)
         pedidos: list[httpx2.Request] = []
 
@@ -68,7 +68,7 @@ def armar_real(tmp_path):
             s, client=FinnegansClient(s, http=http), docs=DocsFalso(), workspace=Workspace())
         almacen = almacen if almacen is not None else AlmacenMemoria()
         ctx.permisos = Permisos(almacen)
-        server = crear_servidor(s, swagger=catalogo(s, SPEC), contexto=ctx)
+        server = crear_servidor(s, swagger=catalogo(s, spec), contexto=ctx)
         creados.append((ctx, http))
         return server, ctx, almacen, pedidos
 
@@ -178,3 +178,42 @@ async def test_escaneo_real_sin_red_en_las_entidades_conserva_el_mapa(armar_real
     assert ctx.permisos.solo_lectura("proveedor")
     assert ctx.permisos.estado_texto() == "Permisos: la última revisión falló; se usa la anterior"
     assert any(r.url.path == f"/api/cliente/{ID_INEXISTENTE}" for r in pedidos)
+
+
+async def test_escaneo_real_revisa_los_reportes_baratos_sin_pedirlos(armar_real, espia):
+    """Con requerido: sin parametros. Con rango: fechas invertidas. El resto no."""
+    spec = spec_grande(1)  # ReporteClientes0000 tiene PARAM_Filtro0 requerido
+    spec["tags"].append({"name": "ConRango", "description": "Reporte. Tipo: Viewer"})
+    spec["paths"]["/reports/ConRango"] = {"get": {
+        "tags": ["ConRango"], "summary": "Con rango", "operationId": "reports_ConRango",
+        "parameters": [
+            {"name": "PARAM_Fechadesde", "in": "query", "required": False},
+            {"name": "PARAM_Fechahasta", "in": "query", "required": False},
+        ]}}
+
+    def red(req):
+        if es_token(req):
+            return httpx2.Response(200, text=TOKEN)
+        if req.url.path.endswith("/api/reports/ReporteClientes0000"):
+            return httpx2.Response(400, text='{"error":"Parameter PARAM_Filtro0 is mandatory"}')
+        if req.url.path.endswith("/api/reports/ConRango"):
+            return httpx2.Response(403, text=SIN_PERMISO_REPORTE)
+        return httpx2.Response(404, text="no existe")
+
+    server, ctx, almacen, pedidos = armar_real(red, spec=spec)
+    await llamar(server, reescanear=True)
+    assert ctx.permisos.esperar_escaneo(5)
+    assert espia == []
+    sondas = {r.url.path: dict(r.url.params) for r in pedidos if not es_token(r)}
+    # El de PARAM_Filtro0 va sin parametros; ACOrdenesCompraPendientes (solo una
+    # fecha opcional) no se toca.
+    assert {k: v for k, v in sondas["/api/reports/ReporteClientes0000"].items()
+            if k != "ACCESS_TOKEN"} == {}
+    assert sondas["/api/reports/ConRango"]["PARAM_Fechadesde"] == "2099-01-02"
+    assert sondas["/api/reports/ConRango"]["PARAM_Fechahasta"] == "2099-01-01"
+    assert "/api/reports/ACOrdenesCompraPendientes" not in sondas
+    mapa = almacen.cargar()
+    assert mapa.entradas["reports/reporteclientes0000"].acceso == "permitido"
+    assert mapa.entradas["reports/conrango"].acceso == "denegado"
+    assert "reports/acordenescomprapendientes" not in mapa.entradas
+    assert ctx.permisos.estado_texto().endswith("los demás reportes se revisan al usarlos.")

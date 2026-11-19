@@ -44,29 +44,43 @@ El script hace tres cosas:
 - `cliente` solo trae `FechaAlta`. No tiene usuario de alta ni de modificación.
 - Los paths del swagger que coincidieron con la búsqueda (`/apicatalog/{codigo}`, `/reports/getClaseVOFromApiCatalog`) son el catálogo de APIs, no una auditoría.
 
-### Corrida 2
+### Corrida 2 (2026-11-19, cuenta con permisos completos)
 
-pendiente: censo y prueba del truco de fechas en reportes sin requeridos.
+**Censo de los 238 reportes del swagger:**
+
+| Grupo | Cantidad |
+|---|---|
+| Con algún parámetro requerido | 101 |
+| Sin requeridos, con rango de fechas | 56 |
+| Sin requeridos ni rango de fechas | 81 |
+
+**Truco "desde posterior a hasta"** (2099-01-02 / 2099-01-01) en los cuatro primeros reportes del segundo grupo:
+
+| Reporte | HTTP | Segundos | Respuesta |
+|---|---|---|---|
+| AjusteDeStockSistemaIsma | 200 | 1.1 | `[]` |
+| ANAFACTURACION | 200 | 0.5 | `[]` |
+| analisisCasosDirectos | 200 | 0.6 | `[]` |
+| analisisCobranza | 200 | 0.5 | `[]` |
+
+El candidato "rango de 1 día" devolvió filas reales: no se transcribe porque trae datos del negocio.
 
 ## Lo que se aprendió
 
 - **Un reporte con un parámetro requerido es barato de sondear.** Llamado sin ese parámetro, Finnegans contesta `400 … is mandatory` en menos de un segundo, sin ejecutar el reporte. Una cuenta sin permiso recibe `403 Prestacion sin permiso` antes de esa validación, como se verificó el 2026-11-17. Entonces, para estos reportes:
   - 400 quiere decir **permitido**;
   - 403 "sin permiso" quiere decir **denegado**.
-- **El truco de fechas todavía no se midió.** `DETALLETRANSACCIONES` cortó en `PARAM_Categoria` antes de mirar las fechas, así que los candidatos (b), (c) y (d) no se pudieron evaluar. La corrida 2 los prueba en reportes sin requeridos.
+- **El truco de fechas funciona.** En un reporte sin requeridos pero con rango, "desde posterior a hasta" contesta `[]` en 0.5 a 1.1 s: un rango imposible no trae datos y es barato. Una cuenta sin permiso recibe 403 antes de mirar los parámetros.
 - **Autoría (spec §5.6):** Finnegans no registra en el cliente quién lo modificó. "Quién hizo qué" queda para el registro de cambios de la fase 2.
 
-## Decisiones
+## Decisiones (aplicadas en `src/finnegans_core/escaneo.py`)
 
-Hasta la corrida 2 siguen los valores conservadores:
+El escaneo automático y el pedido con "revisá mis permisos" cubren 157 de los 238 reportes, sin ejecutar ninguno:
 
-- `SONDA_REPORTE = {}`
-- `REPORTES_EN_ESCANEO_AUTOMATICO = False`
+- **Con un parámetro requerido (101):** se sondean sin parámetros, y el 400 cuenta como permitido.
+- **Sin requeridos y con rango (56):** se sondean con "desde posterior a hasta".
+- **Sin requeridos ni rango (81):** se aprenden al usarlos. Revisarlos los ejecuta, así que solo entran con `incluir_reportes=True` y `confirmar=True`, y el aviso habla de "unos 80".
 
-Después de la corrida 2:
-
-- **Reportes con un parámetro requerido:** el escaneo automático los incluye, sondeados sin parámetros.
-- **Reportes sin requeridos y con rango:** el escaneo los incluye con la sonda "desde posterior a hasta", solo si responde en menos de 3 s en todos los reportes probados y con un estado distinto de 403.
-- **Reportes sin requeridos ni rango:** se siguen aprendiendo al usarlos.
+`REPORTES_EN_ESCANEO_AUTOMATICO` queda en `False`: ahora se refiere solo a esos 81.
 
 `guia/escrituras.md` no cambia, porque Finnegans no trae el usuario que edita.

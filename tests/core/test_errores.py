@@ -6,6 +6,7 @@ que hacer a continuacion.
 import unittest
 
 from finnegans_core.errores import traducir_error
+from finnegans_core.permisos import mensaje_sin_permiso
 
 
 # Mensajes crudos reales, tal como los arma FinnegansClient.request().
@@ -192,11 +193,33 @@ class TestCredencialesYPermisos(unittest.TestCase):
         for metodo in ("POST", "PUT", "PATCH", "DELETE"):
             crudo = f'Error en {metodo} cliente (HTTP 403): {{"error":"Forbidden"}}'
             msg = traducir_error("cliente", crudo, id="C1")
-            self.assertIn("permiso", msg.lower(), metodo)
-            self.assertIn(metodo, msg)
-            self.assertIn("'cliente'", msg)
+            self.assertEqual(msg, mensaje_sin_permiso(metodo, "cliente"), metodo)
             self.assertNotIn("rechazo las credenciales", msg)
             self.assertNotIn("FINNEGANS_", msg)
+
+    def test_lectura_403_sin_permiso_no_culpa_a_las_credenciales(self):
+        msg = traducir_error(
+            "reports/X",
+            "Error en GET reports/X (HTTP 403): Forbidden: Prestacion sin permiso",
+        )
+        self.assertEqual(msg, mensaje_sin_permiso("GET", "reports/X"))
+        self.assertNotIn("credenciales", msg)
+
+    def test_500_no_tiene_permisos_no_dice_falta_parametro(self):
+        msg = traducir_error(
+            "Tareas",
+            "Error en GET Tareas (HTTP 500): No tiene permisos para transacciones "
+            "de la categoría Tareas",
+        )
+        self.assertEqual(msg, mensaje_sin_permiso("GET", "Tareas"))
+
+    def test_escritura_403_usa_el_mensaje_nuevo(self):
+        msg = traducir_error("cliente", 'Error en PUT cliente (HTTP 403): {"error":"Forbidden"}')
+        self.assertEqual(msg, mensaje_sin_permiso("PUT", "cliente"))
+
+    def test_403_sin_texto_de_permiso_sigue_siendo_credenciales(self):
+        msg = traducir_error("cliente", "Error en GET cliente (HTTP 403): token invalido")
+        self.assertIn("credenciales", msg)
 
 
 class TestDetalleDel500EnEscrituras(unittest.TestCase):

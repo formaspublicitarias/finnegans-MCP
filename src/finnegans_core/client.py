@@ -14,6 +14,7 @@ from urllib.parse import quote
 import httpx2
 
 from .config import Settings
+from .permisos import es_rechazo_permiso
 from .secretos import Redactor
 
 TTL_TOKEN_SEGUNDOS = 3600
@@ -133,7 +134,8 @@ class FinnegansClient:
                 self.redactor.limpiar(f"No se pudo conectar a Finnegans ({path}): {e}")
             ) from None
 
-        if resp.status_code in (401, 403) and reintentar:
+        if (resp.status_code in (401, 403) and reintentar
+                and not es_rechazo_permiso(resp.status_code, resp.text)):
             self.token(forzar=True)
             return self._request(metodo, path, id, params, body, reintentar=False)
         # Las redirecciones no se siguen: un 3xx no es una respuesta aceptada,

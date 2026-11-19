@@ -259,3 +259,30 @@ def test_una_redireccion_al_pedir_el_token_es_error():
                                              text="TOKEN-FALSO"))
     with pytest.raises(FinnegansAuthError):
         c.token()
+
+
+def _contar(cuerpo_get, status_get=403):
+    cuenta = {"token": 0, "get": 0}
+
+    def h(req):
+        if req.url.path == "/api/oauth/token":
+            cuenta["token"] += 1
+            return httpx2.Response(200, text="abc")
+        cuenta["get"] += 1
+        return httpx2.Response(status_get, text=cuerpo_get)
+
+    return cuenta, h
+
+
+def test_403_sin_permiso_no_reautentica():
+    cuenta, h = _contar('{"error":"Forbidden: Prestacion sin permiso"}')
+    with pytest.raises(FinnegansError, match="Prestacion sin permiso"):
+        _cliente(h).request("GET", "reports/X")
+    assert cuenta == {"token": 1, "get": 1}
+
+
+def test_403_comun_sigue_reintentando_una_vez():
+    cuenta, h = _contar("Forbidden")
+    with pytest.raises(FinnegansError):
+        _cliente(h).request("GET", "cliente")
+    assert cuenta == {"token": 2, "get": 2}

@@ -17,6 +17,7 @@ from finnegans_core.client import FinnegansError
 from finnegans_core.config import Settings
 from finnegans_core.secretos import Redactor
 from finnegans_core.workspace import Workspace
+from finnegans_mcp.contexto import Contexto
 from finnegans_mcp.server import crear_servidor
 
 CLIENT_ID = "cid-falso-1a2b3c"
@@ -214,7 +215,8 @@ def armar(tmp_path):
         ws = Workspace()
         abiertos.append(ws)
         d = None if usar_docs_real else (docs or DocsFalso())
-        server = crear_servidor(s, client=cli, swagger=sw, docs=d, workspace=ws)
+        ctx = Contexto.desde_settings(s, client=cli, docs=d, workspace=ws)
+        server = crear_servidor(s, swagger=sw, contexto=ctx)
         return Entorno(server, cli, ws, s, d)
 
     yield _armar

@@ -15,7 +15,16 @@ Las dos compañías reales son **Formas Publicitarias SA** y **Soutex SA**
 
 ## Unidades de negocio de Formas Publicitarias SA
 Sub-dimensión de la sucursal: "Formas Shop", "Corporate", "No Estrés".
-Cómo filtrar cada una: a completar con el uso.
+No hay un campo "unidad de negocio": se distinguen por el subtipo de la
+transacción (`TRANSACCIONSUBTIPONOMBRE` en `reports/PedidosDeVentaFP`).
+
+| Unidad de negocio | Subtipo del pedido de venta | Estado |
+|---|---|---|
+| Formas Shop | `Pedido de Venta - STP` | Confirmado por el usuario |
+| Corporate | `Pedido de Venta - FP` | Deducido (grandes empresas); sin confirmar |
+| No Estrés | `Pedido de Venta - NoEstres` | Deducido por el nombre; sin confirmar |
+
+También aparece `Pedido de Venta - MarketShell`, sin unidad asignada todavía.
 
 ## Cuándo preguntar
 - Si el pedido necesita sucursal, unidad de negocio o rango de fechas y el

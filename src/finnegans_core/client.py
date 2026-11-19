@@ -1,7 +1,8 @@
 """Cliente HTTP de la API de Finnegans (Teamplace / F3) sobre httpx2.
 
 - Autenticacion client_credentials; el token se cachea en memoria 1 hora.
-- Inyecta ACCESS_TOKEN en cada llamada y reintenta una vez ante 401/403.
+- Inyecta ACCESS_TOKEN en cada llamada y reintenta una vez ante 401/403,
+  salvo que la respuesta diga que falta permiso (eso no lo arregla otro token).
 - Todo mensaje de error pasa por el Redactor: ni credenciales ni tokens salen.
 """
 from __future__ import annotations

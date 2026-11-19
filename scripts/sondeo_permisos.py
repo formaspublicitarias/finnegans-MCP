@@ -14,8 +14,10 @@ Por cada reporte prueba cuatro candidatos y mide cuanto tarda cada uno:
   (d) un rango de 1 dia sobre ayer.
 Imprime reporte, candidato, estado HTTP, segundos y los primeros 120 caracteres de
 la respuesta ya redactada. Nunca imprime claves, tokens ni URLs con parametros.
-Ojo: el cliente reintenta una vez ante 401/403 (renueva el token), asi que el
-tiempo de un 403 incluye ese reintento.
+Ojo: ante un 401/403 el cliente renueva el token y reintenta una vez, salvo que
+la respuesta diga que falta permiso ("Prestacion sin permiso" o "No tiene
+permisos"): ese 403 vuelve sin reintento, asi que su tiempo es el de una sola
+llamada. Un 401/403 por otra causa si incluye el reintento.
 
 Para autoria lee cliente/list y un cliente: imprime solo los NOMBRES de los campos
 que parecen de usuario/modificacion (nunca sus valores) y los paths del swagger que

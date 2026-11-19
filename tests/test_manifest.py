@@ -113,3 +113,11 @@ def test_version_igual_en_manifest_pyproject_y_servidor():
     info = asyncio.run(_server_info())
     assert info.name == "finnegans"
     assert info.version == __version__
+
+
+def test_uv_lock_registra_la_version_del_paquete():
+    import tomllib
+
+    lock = tomllib.loads((RAIZ / "uv.lock").read_text(encoding="utf-8"))
+    (propio,) = [p for p in lock["package"] if p["name"] == "finnegans-mcp"]
+    assert propio["version"] == MANIFEST["version"]

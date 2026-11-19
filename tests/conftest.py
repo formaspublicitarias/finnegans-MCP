@@ -12,3 +12,11 @@ def _limpiar_caches_swagger():
     limpiar_caches()
     yield
     limpiar_caches()
+
+
+@pytest.fixture(autouse=True)
+def _datos_de_app_aislados(tmp_path, monkeypatch):
+    """Ningun test escribe en la carpeta de datos real de la app."""
+    datos = tmp_path / "datos-de-app"
+    monkeypatch.setenv("LOCALAPPDATA", str(datos))
+    monkeypatch.setenv("XDG_DATA_HOME", str(datos))

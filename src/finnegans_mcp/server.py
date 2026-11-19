@@ -13,25 +13,30 @@ import logging
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 import anyio.to_thread
 from mcp.server import MCPServer
 from mcp_types import ToolAnnotations
 
+from finnegans_core.almacen_permisos import AlmacenLocal, AlmacenMemoria, carpeta_datos
 from finnegans_core.catalogo.busqueda import buscar_endpoint, formatear_busqueda
 from finnegans_core.catalogo.docs_mcp import DocsMcp, DocsMcpError
 from finnegans_core.catalogo.swagger import Operacion, SwaggerCatalog, SwaggerError
 from finnegans_core.client import FinnegansAuthError, FinnegansClient, FinnegansError
 from finnegans_core.config import Settings
 from finnegans_core.errores import traducir_error
+from finnegans_core.escaneo import REPORTES_EN_ESCANEO_AUTOMATICO, Escaner
 from finnegans_core.exportar import exportar as exportar_archivo
 from finnegans_core.guia import guia as guia_tema
+from finnegans_core.permisos import (
+    Acceso, Permisos, TipoRecurso, mensaje_sin_permiso, rechazo_en_mensaje,
+)
 from finnegans_core.presupuesto import RESPUESTA_MAX_CHARS, nombre_tabla, resumir_valor
-from finnegans_core.secretos import Redactor
 from finnegans_core.workspace import ConsultaInvalida, Resumen, Workspace
 
 from finnegans_mcp import __version__
+from finnegans_mcp.contexto import Contexto, ProveedorContexto
 from finnegans_mcp.escritura import armar_body, diff
 from finnegans_mcp.instrucciones import INSTRUCCIONES
 
@@ -56,6 +61,22 @@ _MIN_POR_OPERACION = 500
 # client_id/client_secret en el query string y el swagger lleva su key ahi.
 # Claude Desktop guarda el stderr del servidor en su log.
 _LOGGERS_HTTP = ("httpx2", "httpcore2", "httpx", "httpcore")
+
+# Textos de permisos (spec §5): exactos.
+_TODO_OCULTO = (
+    "Lo que buscás existe en Finnegans, pero tu usuario no tiene permiso. Si lo "
+    "necesitás, pedíselo a quien administra Finnegans y después pedime que revise tus "
+    "permisos."
+)
+_SOLO_LECTURA = "solo lectura para vos"
+_REESCANEO_INICIADO = "Estoy revisando tus permisos, tarda unos 2 minutos."
+_REESCANEO_EN_CURSO = "Ya estoy revisando tus permisos; en un par de minutos está listo."
+_AVISO_REPORTES = (
+    "Ojo: revisar los reportes los ejecuta en Finnegans (unos 140); conviene hacerlo "
+    "fuera del horario de trabajo. Si igual querés hacerlo, pedímelo de nuevo confirmando."
+)
+
+HacerEscaneo = Callable[["Contexto", bool], dict[str, tuple[Acceso, TipoRecurso]]]
 
 
 # ------------------------------------------------------------------ helpers
@@ -170,6 +191,15 @@ def _es_corte_de_conexion(e: BaseException) -> bool:
     )
 
 
+def _es_rechazo(e: BaseException, escritura: bool) -> bool:
+    """Finnegans rechazo por falta de permiso (no por claves malas)."""
+    return (
+        isinstance(e, FinnegansError)
+        and not isinstance(e, FinnegansAuthError)
+        and rechazo_en_mensaje(str(e), escritura=escritura)
+    )
+
+
 def _mensaje_error(
     e: BaseException, limpiar: Limpiar, api_id: str = "", id: str | None = None
 ) -> str:
@@ -187,6 +217,13 @@ def _mensaje_error(
         f"Ocurrió un error inesperado ({type(e).__name__}): {e}. "
         "Si se repite, avisale a IT."
     )
+
+
+def _permisos_por_defecto(settings: Settings) -> Permisos:
+    """Permisos guardados en esta PC; sin Client ID no hay de quien, quedan en memoria."""
+    if (settings.client_id or "").strip():
+        return Permisos(AlmacenLocal(carpeta_datos(), settings.client_id))
+    return Permisos(AlmacenMemoria())
 
 
 def _formatear_parametro(limpiar: Limpiar, p: dict) -> str:
@@ -295,38 +332,80 @@ def crear_servidor(
     swagger: SwaggerCatalog | None = None,
     docs: DocsMcp | None = None,
     workspace: Workspace | None = None,
+    *,
+    contexto: Contexto | ProveedorContexto | None = None,
+    modo: Literal["escritorio", "remoto"] = "escritorio",
+    escanear_al_iniciar: bool = False,
+    hacer_escaneo: HacerEscaneo | None = None,
 ) -> MCPServer:
-    """Arma el servidor con sus 8 herramientas. Cada dependencia se puede inyectar."""
+    """Arma el servidor con sus 8 herramientas. Cada dependencia se puede inyectar.
+
+    Lo que es de una persona (cliente, workspace, docs, tablas cargadas,
+    redactor, permisos) vive en un Contexto: cada herramienta lo pide al
+    proveedor al empezar. Sin `contexto` se arma uno con settings, client, docs
+    y workspace; con un Contexto se usa siempre ese; con una funcion, esa es el
+    proveedor (y client, docs y workspace no se usan). Un Contexto sin permisos
+    recibe los de su almacen local. El swagger es uno solo para todo el
+    proceso. `modo` por ahora solo acepta "escritorio".
+
+    `hacer_escaneo(ctx, incluir_reportes)` revisa los permisos de la persona
+    (por defecto sondea Finnegans con su cliente); corre en segundo plano. Con
+    `escanear_al_iniciar`, arranca uno si la persona nunca se escaneo o el
+    ultimo escaneo fallo, y tiene Client ID y secret de Finnegans. Ese escaneo
+    conserva lo aprendido por uso; un reescaneo pedido lo olvida.
+    """
+    if modo != "escritorio":
+        raise ValueError(
+            f"El modo '{modo}' todavía no existe: por ahora el servidor solo corre "
+            "en modo 'escritorio'."
+        )
     for nombre in _LOGGERS_HTTP:
         logging.getLogger(nombre).setLevel(logging.WARNING)
-    client = client if client is not None else FinnegansClient(settings)
     swagger = swagger if swagger is not None else SwaggerCatalog(settings)
-    docs = docs if docs is not None else DocsMcp(settings)
-    workspace = workspace if workspace is not None else Workspace()
-    # Path del que salio cada tabla: una fila de un /list o de un reporte no
-    # es el registro completo y no sirve como base de un PUT.
-    origen_tabla: dict[str, str] = {}
-    redactor_propio = Redactor(settings.secretos())
-    # Las herramientas sincronicas corren en hilos: DuckDB no se comparte en paralelo.
-    candado = threading.RLock()
+    if hacer_escaneo is None:
+        def hacer_escaneo(ctx: Contexto, incluir_reportes: bool):
+            return Escaner(ctx.client).escanear(swagger.recursos(), incluir_reportes)
+    if contexto is None:
+        contexto = Contexto.desde_settings(settings, client, docs, workspace)
+    if isinstance(contexto, Contexto):
+        fijo = contexto
+        if fijo.permisos is None:
+            fijo.permisos = _permisos_por_defecto(fijo.settings)
 
-    def limpiar(texto: object) -> str:
-        salida = str(texto)
-        redactor = getattr(client, "redactor", None)
-        if redactor is not None:
-            salida = redactor.limpiar(salida)  # conoce tambien el token
-        return redactor_propio.limpiar(salida)
+        def proveedor_base() -> Contexto:
+            return fijo
+    else:
+        proveedor_base = contexto
+    candado_permisos = threading.Lock()
 
-    workspace.usar_redactor(limpiar)
+    def proveedor() -> Contexto:
+        """El contexto de quien llama, con sus permisos armados si no los traia."""
+        ctx = proveedor_base()
+        if ctx.permisos is None:
+            with candado_permisos:
+                if ctx.permisos is None:
+                    ctx.permisos = _permisos_por_defecto(ctx.settings)
+        return ctx
 
-    def error(e: BaseException, api_id: str = "", id: str | None = None) -> str:
-        return _mensaje_error(e, limpiar, api_id, id)
+    def escanear(ctx: Contexto, incluir_reportes: bool, pedido: bool = False) -> bool:
+        """Arranca un escaneo en segundo plano; False si ya habia uno corriendo.
 
-    def corto(v: Any, max_len: int) -> str:
-        return _corto(limpiar, v, max_len)
+        Un escaneo `pedido` (reescanear) olvida lo aprendido por uso si termina bien.
+        """
+        return ctx.permisos.escanear_en_segundo_plano(
+            lambda: hacer_escaneo(ctx, incluir_reportes),
+            reportes=incluir_reportes, olvidar_aprendido=pedido)
 
-    def responder(texto: object, como_seguir: str = "Pedí algo más acotado.") -> str:
-        return _ajustar(limpiar(texto), como_seguir)
+    def error(ctx: Contexto, e: BaseException, api_id: str = "", id: str | None = None) -> str:
+        return _mensaje_error(e, ctx.limpiar, api_id, id)
+
+    def corto(ctx: Contexto, v: Any, max_len: int) -> str:
+        return _corto(ctx.limpiar, v, max_len)
+
+    def responder(
+        ctx: Contexto, texto: object, como_seguir: str = "Pedí algo más acotado."
+    ) -> str:
+        return _ajustar(ctx.limpiar(texto), como_seguir)
 
     server = MCPServer("finnegans", instructions=INSTRUCCIONES, version=__version__)
 
@@ -347,12 +426,26 @@ def crear_servidor(
         structured_output=False,
     )
     async def buscar_endpoint_tool(consulta: str) -> str:
+        ctx = proveedor()
         try:
-            r = await buscar_endpoint(consulta, swagger, docs)
+            r = await buscar_endpoint(consulta, swagger, ctx.docs)
+            visibles, ocultas = [], []
+            for f in r.filas:
+                (ocultas if ctx.permisos.denegado(f.path) else visibles).append(f)
+            if ocultas:
+                r.filas = visibles
+                if not visibles:
+                    return responder(ctx, _TODO_OCULTO)
+                # Una nota que nombra un path oculto lo mostraria igual.
+                nombres = {f.path.strip("/").casefold() for f in ocultas}
+                r.notas = [n for n in r.notas
+                           if not any(p in n.casefold() for p in nombres)]
             sobran = len(r.filas) - _BUSQUEDA_MAX_FILAS
             r.filas = r.filas[:_BUSQUEDA_MAX_FILAS]
             for f in r.filas:
-                f.resumen = corto(f.resumen, _RESUMEN_BUSQUEDA_MAX)
+                f.resumen = corto(ctx, f.resumen, _RESUMEN_BUSQUEDA_MAX)
+                if ctx.permisos.solo_lectura(f.path):
+                    f.resumen = f"{f.resumen} · {_SOLO_LECTURA}" if f.resumen else _SOLO_LECTURA
             texto = formatear_busqueda(r)
             if sobran > 0:
                 texto += (
@@ -360,8 +453,8 @@ def crear_servidor(
                     "si ninguno sirve, buscá con palabras más específicas.)"
                 )
         except Exception as e:  # noqa: BLE001 - ningun error sale crudo
-            texto = error(e)
-        return responder(texto, "Buscá con palabras más específicas.")
+            texto = error(ctx, e)
+        return responder(ctx, texto, "Buscá con palabras más específicas.")
 
     # ---------------------------------------------------------- ver_endpoint
 
@@ -382,7 +475,7 @@ def crear_servidor(
         tiene = ", ".join(dict.fromkeys(o.metodo for o in ops))
         return [], f"'{path}' no tiene la operación {m}. Tiene: {tiene}."
 
-    def _ver_operaciones(path: str, metodo: str | None) -> str:
+    def _ver_operaciones(ctx: Contexto, path: str, metodo: str | None) -> str:
         ops = swagger.ver(path)
         if not ops:
             return _no_encontrado(path)
@@ -396,7 +489,7 @@ def crear_servidor(
                 "solo por nombre; para ver sus subcampos: "
                 "ver_endpoint(path, campo=..., metodo=...)."
             )
-        detalle = "\n\n".join(_formatear_operacion(limpiar, o) for o in ops) + pie
+        detalle = "\n\n".join(_formatear_operacion(ctx.limpiar, o) for o in ops) + pie
         if len(detalle) <= RESPUESTA_MAX_CHARS:
             return detalle
 
@@ -414,7 +507,7 @@ def crear_servidor(
         if total // len(ops) >= _MIN_POR_OPERACION:
             # Pocas operaciones: cada una se achica en vez de desaparecer. Las que
             # entran enteras usan solo lo suyo; el resto se reparte entre las grandes.
-            enteras = {id(o): len(_formatear_operacion(limpiar, o)) + 2 for o in ops}
+            enteras = {id(o): len(_formatear_operacion(ctx.limpiar, o)) + 2 for o in ops}
             tope: dict[int, int | None] = {}
             pendientes = sorted(ops, key=lambda o: enteras[id(o)])
             restante = total
@@ -430,8 +523,8 @@ def crear_servidor(
                         tope[id(o)] = parte - 2
                     break
             return "\n\n".join(
-                _formatear_operacion(limpiar, o, tope[id(o)], como_ver_todo(o))
-                if tope[id(o)] is not None else _formatear_operacion(limpiar, o)
+                _formatear_operacion(ctx.limpiar, o, tope[id(o)], como_ver_todo(o))
+                if tope[id(o)] is not None else _formatear_operacion(ctx.limpiar, o)
                 for o in ops
             ) + pie
 
@@ -441,7 +534,7 @@ def crear_servidor(
         for o in ops:
             linea = f"- {o.metodo} {o.path} [{o.tipo}]"
             if o.resumen:
-                linea += f" — {corto(o.resumen, 50)}"
+                linea += f" — {corto(ctx, o.resumen, 50)}"
             if usado + len(linea) + 1 > RESPUESTA_MAX_CHARS - _RESERVA:
                 break
             lineas.append(linea)
@@ -464,7 +557,7 @@ def crear_servidor(
         encabezado += "usá buscar_endpoint para encontrar el que necesitás."
         return encabezado + "\n\n" + "\n".join(lineas)
 
-    def _ver_campo(path: str, campo: str, metodo: str | None) -> str:
+    def _ver_campo(ctx: Contexto, path: str, campo: str, metodo: str | None) -> str:
         ops = swagger.ver(path)
         if not ops:
             return _no_encontrado(path)
@@ -499,7 +592,7 @@ def crear_servidor(
                 if tipo in ("object", "array") or "$ref" in d or "properties" in d:
                     linea += " [anidado]"
                 if d.get("description"):
-                    linea += f": {corto(d['description'], _DESCRIPCION_MAX)}"
+                    linea += f": {corto(ctx, d['description'], _DESCRIPCION_MAX)}"
                 lineas.append(linea)
             return "\n".join(lineas)
         return str(ultimo)
@@ -522,18 +615,23 @@ def crear_servidor(
     def ver_endpoint_tool(
         path: str, campo: str | None = None, metodo: str | None = None
     ) -> str:
+        ctx = proveedor()
+        if ctx.permisos.denegado(path):
+            return responder(ctx, mensaje_sin_permiso("GET", path.strip("/")))
         try:
             if campo:
-                texto = _ver_campo(path, campo, metodo)
+                texto = _ver_campo(ctx, path, campo, metodo)
             else:
-                texto = _ver_operaciones(path, metodo)
+                texto = _ver_operaciones(ctx, path, metodo)
         except Exception as e:  # noqa: BLE001
-            texto = error(e, path)
-        return responder(texto, "Pedí un path exacto o un campo puntual.")
+            texto = error(ctx, e, path)
+        if ctx.permisos.solo_lectura(path):
+            texto = f"({path.strip('/')}: {_SOLO_LECTURA})\n{texto}"
+        return responder(ctx, texto, "Pedí un path exacto o un campo puntual.")
 
     # ------------------------------------------------------------------ leer
 
-    def _presentar_lectura(datos: Any, resumen: Resumen) -> str:
+    def _presentar_lectura(ctx: Contexto, datos: Any, resumen: Resumen) -> str:
         if resumen.tabla is None:
             if isinstance(datos, list) and not datos:
                 return resumen.nota or "La API devolvió una lista vacía (sin filas)."
@@ -542,7 +640,7 @@ def crear_servidor(
                 "La API devolvió algo sin forma de tabla (no quedó cargado en el "
                 f"workspace):\n{texto}"
             )
-            if len(limpiar(directo)) <= RESPUESTA_MAX_CHARS:
+            if len(ctx.limpiar(directo)) <= RESPUESTA_MAX_CHARS:
                 return directo
             return resumen.nota or "La API devolvió algo sin forma de tabla."
 
@@ -557,14 +655,14 @@ def crear_servidor(
         )
         if filas <= RESPUESTA_MAX_CHARS // 10:
             directo = f"{encabezado}\n\n{_a_json(datos)}"
-            if len(limpiar(directo)) <= RESPUESTA_MAX_CHARS:
+            if len(ctx.limpiar(directo)) <= RESPUESTA_MAX_CHARS:
                 return directo
 
         partes = [
             f"Cargué la respuesta en la tabla {t}: {filas} fila{'s' if filas != 1 else ''} "
             f"y {len(resumen.columnas)} columnas. No la muestro entera porque no entra "
             "en el chat.",
-            "Columnas: " + _formatear_columnas(limpiar, t, resumen.columnas),
+            "Columnas: " + _formatear_columnas(ctx.limpiar, t, resumen.columnas),
         ]
         if resumen.muestra:
             partes.append(f"Muestra (primeras filas, celdas largas cortadas con …):\n{resumen.muestra}")
@@ -598,22 +696,27 @@ def crear_servidor(
         params: dict | None = None,
         tabla: str | None = None,
     ) -> str:
+        ctx = proveedor()
         id = _id_texto(id)
         try:
-            datos = client.request("GET", path, id=id, params=params)
+            datos = ctx.client.request("GET", path, id=id, params=params)
         except Exception as e:  # noqa: BLE001
-            return responder(error(e, path, id))
+            if _es_rechazo(e, escritura=False):
+                ctx.permisos.registrar_lectura(path, ok=False)
+            return responder(ctx, error(ctx, e, path, id))
+        # Un denegado viejo se corrige: el permiso pudo darse despues del escaneo.
+        ctx.permisos.registrar_lectura(path, ok=True)
         nombre = nombre_tabla(tabla) if tabla else nombre_tabla(path, id)
         try:
-            with candado:
-                origen_tabla.pop(nombre, None)
-                resumen = workspace.cargar(nombre, datos)
+            with ctx.candado:
+                ctx.origen_tabla.pop(nombre, None)
+                resumen = ctx.workspace.cargar(nombre, datos)
                 if resumen.tabla is not None:
-                    origen_tabla[nombre] = path
-            texto = _presentar_lectura(datos, resumen)
+                    ctx.origen_tabla[nombre] = path
+            texto = _presentar_lectura(ctx, datos, resumen)
         except Exception as e:  # noqa: BLE001
-            texto = error(e)
-        return responder(texto, f"Usá consultar sobre la tabla {nombre} para ver el resto.")
+            texto = error(ctx, e)
+        return responder(ctx, texto, f"Usá consultar sobre la tabla {nombre} para ver el resto.")
 
     # ------------------------------------------------------------- consultar
 
@@ -632,14 +735,15 @@ def crear_servidor(
         structured_output=False,
     )
     def consultar_tool(sql: str, desde: int = 0) -> str:
+        ctx = proveedor()
         try:
-            with candado:
-                texto = workspace.consultar(sql, desde)
+            with ctx.candado:
+                texto = ctx.workspace.consultar(sql, desde)
         except ConsultaInvalida as e:
             texto = f"{e}\nPara ver qué tablas hay cargadas: consultar(\"SHOW TABLES\")."
         except Exception as e:  # noqa: BLE001
-            texto = error(e)
-        return responder(texto, "Pedí menos columnas o filas, o usá exportar.")
+            texto = error(ctx, e)
+        return responder(ctx, texto, "Pedí menos columnas o filas, o usá exportar.")
 
     # -------------------------------------------------------------- exportar
 
@@ -658,22 +762,25 @@ def crear_servidor(
         structured_output=False,
     )
     def exportar_tool(sql: str, formato: str = "xlsx", nombre: str | None = None) -> str:
+        ctx = proveedor()
         fmt = (formato or "xlsx").strip().lower().lstrip(".")
         if fmt not in ("xlsx", "csv"):
-            return responder(f"No sé exportar en formato '{formato}': usá 'xlsx' o 'csv'.")
+            return responder(ctx, f"No sé exportar en formato '{formato}': usá 'xlsx' o 'csv'.")
         try:
-            with candado:
-                columnas, filas, hay_mas = workspace.ejecutar_con_tope(sql)
+            with ctx.candado:
+                columnas, filas, hay_mas = ctx.workspace.ejecutar_con_tope(sql)
             carpeta = (
-                Path(settings.export_dir) if settings.export_dir
+                Path(ctx.settings.export_dir) if ctx.settings.export_dir
                 else Path.home() / "Documents" / "Finnegans"
             )
             base = nombre or f"finnegans-{datetime.now():%Y%m%d-%H%M%S}"
             ruta = exportar_archivo(columnas, filas, carpeta, base, fmt)
         except ConsultaInvalida as e:
-            return responder(f"{e}\nPara ver qué tablas hay cargadas: consultar(\"SHOW TABLES\").")
+            return responder(
+                ctx, f"{e}\nPara ver qué tablas hay cargadas: consultar(\"SHOW TABLES\")."
+            )
         except Exception as e:  # noqa: BLE001
-            return responder(error(e))
+            return responder(ctx, error(ctx, e))
         texto = f"Listo: exporté {len(filas)} fila{'s' if len(filas) != 1 else ''} a {ruta}"
         if hay_mas:
             texto += (
@@ -681,22 +788,22 @@ def crear_servidor(
                 "exportación es ese, así que el archivo tiene solo las primeras. Acotala "
                 "con WHERE (por ejemplo por fechas) y exportá en partes."
             )
-        return responder(texto)
+        return responder(ctx, texto)
 
     # -------------------------------------------------------------- escribir
 
-    def _registro_base(base: str) -> tuple[dict | None, str | None]:
+    def _registro_base(ctx: Contexto, base: str) -> tuple[dict | None, str | None]:
         """(registro, None) o (None, mensaje para Claude)."""
         try:
-            with candado:
-                crudo = workspace.crudo(base)
+            with ctx.candado:
+                crudo = ctx.workspace.crudo(base)
         except KeyError:
             return None, (
                 f"No hay ninguna tabla '{base}' cargada en el workspace. Primero cargá "
                 "el registro con leer(path, id=CODIGO) y pasá como base el nombre de "
                 "tabla que te devuelva."
             )
-        origen = origen_tabla.get(base)
+        origen = ctx.origen_tabla.get(base)
         if origen is not None and _es_listado(origen):
             return None, (
                 f"La tabla '{base}' salió de '{origen}', que es un listado o un reporte: "
@@ -787,10 +894,11 @@ def crear_servidor(
         cambios: dict | None = None,
         params: dict | None = None,
     ) -> str:
+        ctx = proveedor()
         id = _id_texto(id)
         estado = {"enviado": False}
         try:
-            return _escribir(estado, metodo, path, id, body, base, cambios, params)
+            return _escribir(ctx, estado, metodo, path, id, body, base, cambios, params)
         except Exception as e:  # noqa: BLE001 - ningun error sale crudo
             if estado["enviado"]:
                 aviso = (
@@ -799,19 +907,19 @@ def crear_servidor(
                 )
             else:
                 aviso = "No se envió nada a Finnegans."
-            return responder(f"{aviso}\n{error(e, path, id)}")
+            return responder(ctx, f"{aviso}\n{error(ctx, e, path, id)}")
 
-    def _escribir(estado, metodo, path, id, body, base, cambios, params) -> str:
+    def _escribir(ctx: Contexto, estado, metodo, path, id, body, base, cambios, params) -> str:
         m = (metodo or "").strip().upper()
         if m not in METODOS_ESCRITURA:
-            return responder(
+            return responder(ctx,
                 f"escribir solo hace POST, PUT, PATCH o DELETE (llegó '{metodo}'). "
                 "Para leer datos usá leer."
             )
         destino = f"{path.strip('/')}/{id}" if id else path.strip("/")
         if m == "DELETE":
             if body is not None or base is not None or cambios:
-                return responder(
+                return responder(ctx,
                     "DELETE no lleva body, base ni cambios: indicá solo path e id. No se "
                     "envió nada a Finnegans."
                 )
@@ -820,21 +928,21 @@ def crear_servidor(
         else:
             antes = None
             if base is not None:
-                antes, problema = _registro_base(base)
+                antes, problema = _registro_base(ctx, base)
                 if problema:
-                    return responder(problema + " No se envió nada a Finnegans.")
+                    return responder(ctx, problema + " No se envió nada a Finnegans.")
             try:
                 enviado = armar_body(body, antes, cambios)
             except ValueError as e:
-                return responder(f"{e} No se envió nada a Finnegans.")
+                return responder(ctx, f"{e} No se envió nada a Finnegans.")
             if not enviado:
-                return responder(
+                return responder(ctx,
                     f"Falta el body para {m}: pasá el registro completo en body, o base + "
                     "cambios. No se envió nada a Finnegans."
                 )
             problema = _otro_registro(m, path, id, base, antes, enviado)
             if problema:
-                return responder(problema + " No se envió nada a Finnegans.")
+                return responder(ctx, problema + " No se envió nada a Finnegans.")
 
         cod_enviado = _codigo_de(enviado)
         codigo = id or (str(cod_enviado) if cod_enviado not in (None, "") else None)
@@ -842,11 +950,11 @@ def crear_servidor(
         if id is None and codigo and ruta_lectura.endswith("/" + codigo):
             ruta_lectura = ruta_lectura[: -len(codigo) - 1]
         try:
-            respuesta = client.request(
+            respuesta = ctx.client.request(
                 m, path, id=id, params=params, body=enviado if m != "DELETE" else None,
             )
         except TypeError as e:
-            return responder(
+            return responder(ctx,
                 "No se envió nada a Finnegans: el body tiene un valor que no se puede "
                 f"convertir a JSON ({e})."
             )
@@ -858,35 +966,39 @@ def crear_servidor(
                     f"leer('{ruta_lectura}', id='{codigo}')" if codigo
                     else "leer (o el listado del recurso)"
                 )
-                return responder(
+                return responder(ctx,
                     f"No sé si la escritura {m} {destino} se aplicó: la conexión con "
                     "Finnegans se cortó antes de recibir la respuesta, así que puede "
                     f"haberse aplicado. Antes de reintentar, revisá con {revisar} si el "
                     "cambio ya está; reintentar sin revisar puede duplicar un alta.\n"
-                    f"Detalle técnico (para IT): {corto(e, _RESPUESTA_API_MAX)}"
+                    f"Detalle técnico (para IT): {corto(ctx, e, _RESPUESTA_API_MAX)}"
                 )
-            return responder(f"La escritura {m} {destino} falló.\n{error(e, path, id)}")
+            if _es_rechazo(e, escritura=True):
+                ctx.permisos.registrar_escritura_denegada(path)
+            return responder(ctx, f"La escritura {m} {destino} falló.\n{error(ctx, e, path, id)}")
         estado["enviado"] = True
+        # Finnegans la acepto: si estaba marcada de solo lectura, ya no lo es.
+        ctx.permisos.registrar_escritura_ok(path)
 
         if m == "DELETE":
             lineas = [f"Registro eliminado: DELETE {destino} se ejecutó correctamente."]
         else:
             lineas = [f"{m} {destino}: listo, Finnegans aceptó la escritura."]
         if respuesta not in (None, "", {}, []):
-            lineas.append(f"Respuesta de la API: {corto(respuesta, _RESPUESTA_API_MAX)}")
+            lineas.append(f"Respuesta de la API: {corto(ctx, respuesta, _RESPUESTA_API_MAX)}")
         if m not in ("PUT", "POST"):
-            return responder("\n".join(lineas))
+            return responder(ctx, "\n".join(lineas))
 
         try:
             tipo = _tipo_endpoint(path)
         except Exception as e:  # noqa: BLE001
             lineas.append(
                 "La escritura se hizo, pero no pude confirmar en el swagger el tipo del "
-                f"endpoint, así que no releí el registro: {error(e)}"
+                f"endpoint, así que no releí el registro: {error(ctx, e)}"
             )
-            return responder("\n".join(lineas))
+            return responder(ctx, "\n".join(lineas))
         if tipo != "entidad":
-            return responder("\n".join(lineas))
+            return responder(ctx, "\n".join(lineas))
 
         asignado = _id_asignado(respuesta) if m == "POST" else None
         despues = None
@@ -895,7 +1007,7 @@ def crear_servidor(
             # se relee con el tiene ese mismo codigo: verificado para cliente, otra
             # entidad puede devolver un id interno que no es su Codigo.
             try:
-                candidato = _un_registro(client.request("GET", ruta_lectura, id=asignado))
+                candidato = _un_registro(ctx.client.request("GET", ruta_lectura, id=asignado))
             except Exception:  # noqa: BLE001
                 candidato = None
             cod_releido = _codigo_de(candidato)
@@ -917,7 +1029,7 @@ def crear_servidor(
                 if codigo and not _mismo_codigo(codigo, asignado):
                     try:
                         candidato = _un_registro(
-                            client.request("GET", ruta_lectura, id=codigo))
+                            ctx.client.request("GET", ruta_lectura, id=codigo))
                     except Exception:  # noqa: BLE001
                         candidato = None
                     cod_releido = _codigo_de(candidato)
@@ -936,46 +1048,46 @@ def crear_servidor(
                         "o DELETE, buscalo con leer o consultar (por ejemplo por el "
                         "Nombre) para saber su código."
                     )
-                    return responder("\n".join(lineas))
+                    return responder(ctx, "\n".join(lineas))
         else:
             if not codigo:
                 lineas.append(
                     "No releí el registro para compararlo: no sé su código (pasá id o "
                     "incluí Codigo en el body)."
                 )
-                return responder("\n".join(lineas))
+                return responder(ctx, "\n".join(lineas))
             try:
-                despues = client.request("GET", ruta_lectura, id=codigo)
+                despues = ctx.client.request("GET", ruta_lectura, id=codigo)
             except Exception as e:  # noqa: BLE001
                 lineas.append(
                     "La escritura se hizo, pero no pude releer el registro para "
-                    f"compararlo: {error(e, ruta_lectura, codigo)}"
+                    f"compararlo: {error(ctx, e, ruta_lectura, codigo)}"
                 )
-                return responder("\n".join(lineas))
+                return responder(ctx, "\n".join(lineas))
             despues = _un_registro(despues)
             if despues is None:
                 lineas.append("La relectura no devolvió un registro para comparar.")
-                return responder("\n".join(lineas))
+                return responder(ctx, "\n".join(lineas))
 
         if base is not None:
             try:
-                with candado:
-                    workspace.cargar(base, despues)
-                    origen_tabla[base] = ruta_lectura
+                with ctx.candado:
+                    ctx.workspace.cargar(base, despues)
+                    ctx.origen_tabla[base] = ruta_lectura
                 lineas.append(
                     f"Actualicé la tabla {base} con el registro releído: para otro cambio "
                     "usala de nuevo como base."
                 )
             except Exception as e:  # noqa: BLE001
-                lineas.append(f"No pude actualizar la tabla {base}: {error(e)}")
+                lineas.append(f"No pude actualizar la tabla {base}: {error(ctx, e)}")
         encabezado = "\n".join(lineas)
         disponible = RESPUESTA_MAX_CHARS - len(encabezado) - 2
         # Se redacta antes del diff: el diff corta cada valor a 80 caracteres.
         texto = encabezado + "\n\n" + diff(
-            _redactar_valores(limpiar, antes), _redactar_valores(limpiar, enviado),
-            _redactar_valores(limpiar, despues), max_chars=disponible,
+            _redactar_valores(ctx.limpiar, antes), _redactar_valores(ctx.limpiar, enviado),
+            _redactar_valores(ctx.limpiar, despues), max_chars=disponible,
         )
-        return responder(texto, f"Para ver el registro completo: leer('{ruta_lectura}', id='{codigo}').")
+        return responder(ctx, texto, f"Para ver el registro completo: leer('{ruta_lectura}', id='{codigo}').")
 
     # ------------------------------------------------------------------ guia
 
@@ -992,11 +1104,12 @@ def crear_servidor(
         structured_output=False,
     )
     def guia_tool(tema: str | None = None) -> str:
+        ctx = proveedor()
         try:
             texto = guia_tema(tema)
         except Exception as e:  # noqa: BLE001
-            texto = error(e)
-        return responder(texto, "Pedí otro tema con guia(tema).")
+            texto = error(ctx, e)
+        return responder(ctx, texto, "Pedí otro tema con guia(tema).")
 
     # ---------------------------------------------------- verificar_conexion
 
@@ -1016,7 +1129,9 @@ def crear_servidor(
         description=(
             "Revisa la configuración de la extensión: que estén todas las claves, que "
             "Finnegans dé un token, que cargue el swagger y que responda la "
-            "documentación. Dice en castellano qué clave está mal."
+            "documentación. Dice en castellano qué clave está mal. Con reescanear=True "
+            "revisa de nuevo qué entidades puede usar tu usuario; los reportes solo si se "
+            "pide incluir_reportes=True y confirmar=True."
         ),
         annotations=ToolAnnotations(
             title="Verificar conexión", read_only_hint=True, idempotent_hint=True,
@@ -1024,9 +1139,12 @@ def crear_servidor(
         ),
         structured_output=False,
     )
-    async def verificar_conexion_tool() -> str:
+    async def verificar_conexion_tool(
+        reescanear: bool = False, incluir_reportes: bool = False, confirmar: bool = False
+    ) -> str:
+        ctx = proveedor()
         lineas = ["Verificación de la conexión con Finnegans:"]
-        faltan = settings.faltantes()
+        faltan = ctx.settings.faltantes()
         if faltan:
             lineas.append(
                 "Faltan claves en la configuración de la extensión: "
@@ -1034,9 +1152,9 @@ def crear_servidor(
                 "en Claude Desktop."
             )
 
-        if settings.client_id and settings.client_secret:
+        if ctx.settings.client_id and ctx.settings.client_secret:
             try:
-                await anyio.to_thread.run_sync(client.token, True)
+                await anyio.to_thread.run_sync(ctx.client.token, True)
                 lineas.append("- API de Finnegans (token): OK")
             except Exception as e:  # noqa: BLE001
                 lineas.append(f"- API de Finnegans (token): ERROR. {_diagnostico_token(e)}")
@@ -1046,7 +1164,7 @@ def crear_servidor(
                 "de Finnegans."
             )
 
-        if settings.swagger_key:
+        if ctx.settings.swagger_key:
             try:
                 spec = await anyio.to_thread.run_sync(swagger.spec)
                 n = len(spec.get("paths") or {})
@@ -1060,30 +1178,49 @@ def crear_servidor(
         else:
             lineas.append("- Swagger (catálogo de APIs): sin verificar, falta la Clave del swagger.")
 
-        if settings.docs_client_id and settings.docs_secret_key:
+        if ctx.settings.docs_client_id and ctx.settings.docs_secret_key:
             try:
-                await docs.buscar("cliente")
+                await ctx.docs.buscar("cliente")
                 lineas.append("- Documentación de Finnegans (MCP de docs): OK")
             except Exception as e:  # noqa: BLE001
                 lineas.append(
                     "- Documentación de Finnegans (MCP de docs): ERROR. No respondió o "
                     "rechazó las claves (Client ID de la documentación / Secret key de la "
                     "documentación). La búsqueda sigue funcionando solo con el swagger. "
-                    f"Detalle: {corto(e, _RESPUESTA_API_MAX)}"
+                    f"Detalle: {corto(ctx, e, _RESPUESTA_API_MAX)}"
                 )
         else:
             lineas.append(
                 "- Documentación de Finnegans (MCP de docs): sin verificar, faltan sus "
                 "claves. La búsqueda funciona solo con el swagger."
             )
-        return responder("\n".join(lineas))
+
+        if reescanear:
+            if incluir_reportes and not confirmar:
+                # Revisar los reportes los ejecuta en Finnegans: no sin confirmar.
+                lineas.append(_AVISO_REPORTES)
+            elif escanear(ctx, incluir_reportes or REPORTES_EN_ESCANEO_AUTOMATICO, pedido=True):
+                lineas.append(_REESCANEO_INICIADO)
+            else:
+                lineas.append(_REESCANEO_EN_CURSO)
+        lineas.append(f"- {ctx.permisos.estado_texto()}")
+        if ctx.permisos.problema_almacen:
+            lineas.append(ctx.permisos.problema_almacen)
+        return responder(ctx, "\n".join(lineas))
+
+    if escanear_al_iniciar:
+        ctx = proveedor()
+        con_claves = bool((ctx.settings.client_id or "").strip()
+                          and (ctx.settings.client_secret or "").strip())
+        if con_claves and ctx.permisos.estado in ("sin_escanear", "fallo"):
+            escanear(ctx, REPORTES_EN_ESCANEO_AUTOMATICO)
 
     return server
 
 
 def main() -> None:
     """Punto de entrada de la extension: servidor MCP por stdio."""
-    crear_servidor(Settings.from_env()).run()
+    crear_servidor(Settings.from_env(), escanear_al_iniciar=True).run()
 
 
 if __name__ == "__main__":

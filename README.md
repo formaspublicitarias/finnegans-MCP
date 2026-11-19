@@ -38,21 +38,36 @@ entorno de Python. Después abre rápido.
 
 ### El formulario, campo por campo
 
-Todas las claves **te las pasa Juan Sbatella**. No las busques por tu cuenta ni
-las compartas: son personales de la organización.
+Cuatro claves son **personales**: cada persona carga las suyas, y con ellas
+Claude entra a Finnegans con tu propio usuario. No las compartas.
 
-| Campo | Qué es | Obligatorio |
+- El **Client ID y el Client secret de Finnegans** te los da quien administra
+  Finnegans.
+- El **Client ID y la Secret key de la documentación** los encontrás vos en
+  Finnegans GO → Modificar perfil → Datos personales, al final del formulario.
+
+La **Clave del swagger** es de la empresa y ya viene cargada en la versión de
+la empresa: no la cambies.
+
+| Campo | De dónde sale | Obligatorio |
 |---|---|---|
-| Client ID de Finnegans | Identificador de la aplicación en Finnegans. Te lo pasa Juan Sbatella. | Sí |
-| Client secret de Finnegans | Clave secreta de la aplicación. Se guarda enmascarada. Te la pasa Juan Sbatella. | Sí |
-| Clave del swagger | Permite consultar el catálogo de endpoints. Se guarda enmascarada. Te la pasa Juan Sbatella. | Sí |
-| Client ID de la documentación | Identificador para leer la documentación de la API. Te lo pasa Juan Sbatella. | Sí |
-| Secret key de la documentación | Clave secreta de la documentación. Se guarda enmascarada. Te la pasa Juan Sbatella. | Sí |
+| Client ID de Finnegans | Tu identificador de la API de Finnegans. Te lo da quien administra Finnegans. | Sí |
+| Client secret de Finnegans | Tu clave secreta de la API. Se guarda enmascarada. Te la da quien administra Finnegans. | Sí |
+| Client ID de la documentación | Finnegans GO → Modificar perfil → Datos personales. | Sí |
+| Secret key de la documentación | Finnegans GO → Modificar perfil → Datos personales. Se guarda enmascarada. | Sí |
+| Clave del swagger (avanzado) | Clave de la empresa para el catálogo de endpoints. Ya viene cargada: no la cambies. Se guarda enmascarada. | Sí |
 | Carpeta de exportación | Donde se guardan los Excel y CSV que pidas. Por defecto, `Documentos\Finnegans`. | No |
 | URL de la API, del swagger y de la documentación (avanzado) | Direcciones de Finnegans. Ya vienen cargadas: no las cambies salvo que Juan Sbatella te lo indique. | No |
 
 Si falta o está mal alguna clave, pedile a Claude "verificá la conexión con
 Finnegans": te dice cuál es la que falla.
+
+### Solo ves lo que tu usuario puede usar
+
+Claude te muestra solo lo que tu usuario de Finnegans puede usar: si pedís algo
+para lo que no tenés permiso, te lo dice en vez de mostrarlo. Si te dan un
+permiso nuevo, pedile a Claude "revisá mis permisos" para que lo tenga en
+cuenta.
 
 ---
 
@@ -69,7 +84,7 @@ Claude las elige solo según lo que le pedís.
 | `exportar` | Guarda el resultado de una consulta como Excel o CSV en la carpeta de exportación. |
 | `escribir` | Modifica datos en Finnegans (POST, PUT, PATCH o DELETE) y muestra qué cambió. |
 | `guia` | Explica reglas del negocio: sucursales, IIBB, rutas, tipos de endpoint, escrituras, clientes y parámetros de reportes. |
-| `verificar_conexion` | Comprueba las claves y la conexión, y dice cuál falla. |
+| `verificar_conexion` | Comprueba las claves y la conexión, dice cuál falla y cuándo se revisaron tus permisos. Si le pedís "revisá mis permisos", los revisa de nuevo. |
 
 Las lecturas y las escrituras son herramientas separadas a propósito, para que
 Claude Desktop pueda pedirte permiso solo cuando se va a modificar algo.
@@ -110,7 +125,14 @@ Requisitos: Python 3.12 o superior, [uv](https://docs.astral.sh/uv/) y Node.js
 ```bash
 uv sync                          # instala dependencias
 uv run pytest                    # corre los tests
-npx @anthropic-ai/mcpb pack . finnegans.mcpb   # genera el instalable
+```
+
+Para generar el instalable usá el script de empaquetado. La clave del swagger
+de la empresa se toma de la variable de entorno `FINNEGANS_SWAGGER_KEY` (nunca
+de un archivo) y queda precargada solo en el paquete, no en el repo:
+
+```bash
+FINNEGANS_SWAGGER_KEY=... uv run python scripts/empaquetar.py [--salida finnegans.mcpb]
 ```
 
 - `src/finnegans_core/`: la lógica (cliente de Finnegans, catálogo, tablas de

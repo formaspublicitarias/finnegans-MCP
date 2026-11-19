@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, urlsplit, urlunsplit
 import httpx2
 
 from ..config import Settings
+from ..permisos import TipoRecurso, clave_permiso
 from ..secretos import Redactor
 from ..vocabulario import sin_acentos, sinonimos_de, variantes
 
@@ -227,6 +228,28 @@ class SwaggerCatalog:
         if ops is None:
             ops = paths.get("/" + path.lstrip("/"))
         return self._tipo_de_ops(ops)
+
+    # -------------------------------------------------------------- recursos
+    def recursos(self) -> list[tuple[str, TipoRecurso]]:
+        """Reportes ('reports/Nombre') y entidades (primer segmento) con tag.
+
+        Sin duplicados segun `clave_permiso` (se conserva la grafia del swagger);
+        los paths sin tag o de tipo `otro` quedan afuera.
+        """
+        vistos: dict[str, tuple[str, TipoRecurso]] = {}
+        for path, ops in (self.spec().get("paths") or {}).items():
+            tipo = self._tipo_de_ops(ops)
+            partes = [p for p in path.split("/") if p]
+            if tipo == "viewer" and len(partes) >= 2 and partes[0].casefold() == "reports":
+                nombre, kind = f"reports/{partes[1]}", "reporte"
+            elif tipo == "entidad" and partes and partes[0].casefold() != "reports":
+                nombre, kind = partes[0], "entidad"
+            else:
+                continue
+            clave = clave_permiso(nombre)
+            if clave and clave not in vistos:
+                vistos[clave] = (nombre, kind)
+        return list(vistos.values())
 
     # ---------------------------------------------------------------- buscar
     def buscar(self, consulta: str, limite: int = 8) -> list[Coincidencia]:

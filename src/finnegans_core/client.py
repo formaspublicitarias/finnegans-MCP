@@ -1,12 +1,14 @@
 """Cliente HTTP de la API de Finnegans (Teamplace / F3) sobre httpx2.
 
 - Autenticacion client_credentials; el token se cachea en memoria 1 hora.
-- Inyecta ACCESS_TOKEN en cada llamada y reintenta una vez ante 401/403.
+- Inyecta ACCESS_TOKEN en cada llamada y reintenta una vez ante 401/403,
+  salvo que la respuesta diga que falta permiso (eso no lo arregla otro token).
 - Todo mensaje de error pasa por el Redactor: ni credenciales ni tokens salen.
 """
 from __future__ import annotations
 
 import json
+import threading
 import time
 from typing import Any
 from urllib.parse import quote
@@ -14,10 +16,12 @@ from urllib.parse import quote
 import httpx2
 
 from .config import Settings
+from .permisos import es_rechazo_permiso
 from .secretos import Redactor
 
 TTL_TOKEN_SEGUNDOS = 3600
 TIMEOUT_SEGUNDOS = 30
+_LIMITE_SONDEO = 2048
 
 
 class FinnegansError(Exception):
@@ -35,6 +39,7 @@ class FinnegansClient:
         self.redactor = Redactor(settings.secretos())
         self._token: str | None = None
         self._token_ts = 0.0
+        self._token_lock = threading.Lock()
 
     # ---------------------------------------------------------------- util
     def _detalle(self, texto: str, largo: int) -> str:
@@ -93,13 +98,23 @@ class FinnegansClient:
         self.redactor.agregar(token)
         return token
 
+    def _vigente(self) -> bool:
+        return (self._token is not None
+                and (time.monotonic() - self._token_ts) <= TTL_TOKEN_SEGUNDOS)
+
     def token(self, forzar: bool = False) -> str:
-        """Token valido; re-autentica si vencio o se fuerza."""
-        vencido = (time.monotonic() - self._token_ts) > TTL_TOKEN_SEGUNDOS
-        if forzar or self._token is None or vencido:
-            self._token = self._pedir_token()
-            self._token_ts = time.monotonic()
-        return self._token
+        """Token valido; re-autentica si vencio o se fuerza.
+
+        Con lock y doble chequeo: probes concurrentes sobre un cliente nuevo
+        piden un solo token.
+        """
+        if not forzar and self._vigente():
+            return self._token  # type: ignore[return-value]
+        with self._token_lock:
+            if forzar or not self._vigente():
+                self._token = self._pedir_token()
+                self._token_ts = time.monotonic()
+            return self._token  # type: ignore[return-value]
 
     # ------------------------------------------------------------- request
     def request(
@@ -133,7 +148,8 @@ class FinnegansClient:
                 self.redactor.limpiar(f"No se pudo conectar a Finnegans ({path}): {e}")
             ) from None
 
-        if resp.status_code in (401, 403) and reintentar:
+        if (resp.status_code in (401, 403) and reintentar
+                and not es_rechazo_permiso(resp.status_code, resp.text)):
             self.token(forzar=True)
             return self._request(metodo, path, id, params, body, reintentar=False)
         # Las redirecciones no se siguen: un 3xx no es una respuesta aceptada,
@@ -149,3 +165,39 @@ class FinnegansClient:
             return resp.json()
         except ValueError:
             return resp.text
+
+    # -------------------------------------------------------------- sondeo
+    def sondear(
+        self,
+        path: str,
+        id: str | None = None,
+        params: dict | None = None,
+        timeout: float = 10.0,
+    ) -> tuple[int | None, str]:
+        """GET suave para el escaneo de permisos: (status, texto redactado).
+
+        Lee como mucho 2048 bytes y cierra. No reintenta. Un timeout o un fallo
+        de transporte da (None, ""); un fallo de autenticacion o de direccion
+        (FinnegansAuthError) se propaga: unas claves malas no son un permiso.
+        """
+        try:
+            base = self._base(FinnegansAuthError)
+            ruta = f"/api/{path.strip('/')}"
+            if id is not None:
+                ruta += f"/{quote(str(id), safe='')}"
+            query = dict(params or {})
+            query["ACCESS_TOKEN"] = self.token()
+            crudo = b""
+            with self.http.stream("GET", base + ruta, params=query, timeout=timeout,
+                                  headers={"Accept": "application/json"}) as resp:
+                status = resp.status_code
+                for trozo in resp.iter_bytes():
+                    crudo += trozo
+                    if len(crudo) >= _LIMITE_SONDEO:
+                        break
+        except FinnegansAuthError:
+            raise
+        except (httpx2.HTTPError, httpx2.InvalidURL, OSError, ValueError):
+            return None, ""
+        texto = crudo[:_LIMITE_SONDEO].decode("utf-8", errors="replace")
+        return status, self._detalle(texto, _LIMITE_SONDEO)

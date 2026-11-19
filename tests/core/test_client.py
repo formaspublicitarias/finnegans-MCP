@@ -259,3 +259,100 @@ def test_una_redireccion_al_pedir_el_token_es_error():
                                              text="TOKEN-FALSO"))
     with pytest.raises(FinnegansAuthError):
         c.token()
+
+
+def _contar(cuerpo_get, status_get=403):
+    cuenta = {"token": 0, "get": 0}
+
+    def h(req):
+        if req.url.path == "/api/oauth/token":
+            cuenta["token"] += 1
+            return httpx2.Response(200, text="abc")
+        cuenta["get"] += 1
+        return httpx2.Response(status_get, text=cuerpo_get)
+
+    return cuenta, h
+
+
+def test_403_sin_permiso_no_reautentica():
+    cuenta, h = _contar('{"error":"Forbidden: Prestacion sin permiso"}')
+    with pytest.raises(FinnegansError, match="Prestacion sin permiso"):
+        _cliente(h).request("GET", "reports/X")
+    assert cuenta == {"token": 1, "get": 1}
+
+
+def test_403_comun_sigue_reintentando_una_vez():
+    cuenta, h = _contar("Forbidden")
+    with pytest.raises(FinnegansError):
+        _cliente(h).request("GET", "cliente")
+    assert cuenta == {"token": 2, "get": 2}
+
+
+def test_sondear_devuelve_status_y_corta_el_cuerpo():
+    cuenta = {"token": 0}
+    vistos = []
+
+    def h(req):
+        if req.url.path == "/api/oauth/token":
+            cuenta["token"] += 1
+            return httpx2.Response(200, text="abc")
+        vistos.append(req)
+        return httpx2.Response(403, text="x" * 5000)
+
+    c = _cliente(h)
+    status, texto = c.sondear("reports/X", params={"PARAM_A": "1"})
+    assert status == 403
+    assert 0 < len(texto) <= 2048
+    assert vistos[0].url.params["ACCESS_TOKEN"] == "abc"
+    assert vistos[0].url.params["PARAM_A"] == "1"
+    assert cuenta["token"] == 1 and len(vistos) == 1  # sin reintento
+
+    s2, t2 = _cliente(lambda req: httpx2.Response(
+        200, text="abc" if req.url.path == "/api/oauth/token" else f"hola {SECRETO} fin"
+    )).sondear("cliente", id="ZZ-NOEXISTE")
+    assert s2 == 200 and SECRETO not in t2 and "hola" in t2
+
+
+def test_sondear_timeout_da_none():
+    def h(req):
+        if req.url.path == "/api/oauth/token":
+            return httpx2.Response(200, text="abc")
+        raise httpx2.ReadTimeout("lento", request=req)
+
+    assert _cliente(h).sondear("reports/X") == (None, "")
+
+
+def test_sondear_concurrente_pide_un_solo_token():
+    import threading
+    import time
+
+    cuenta = {"token": 0}
+    lock = threading.Lock()
+
+    def h(req):
+        if req.url.path == "/api/oauth/token":
+            with lock:
+                cuenta["token"] += 1
+            time.sleep(0.05)
+            return httpx2.Response(200, text="abc")
+        return httpx2.Response(404, text="no existe")
+
+    c = _cliente(h)
+    hilos = [threading.Thread(target=c.sondear, args=("cliente", "ZZ")) for _ in range(6)]
+    for t in hilos:
+        t.start()
+    for t in hilos:
+        t.join()
+    assert cuenta["token"] == 1
+
+
+def test_sondear_propaga_el_fallo_de_autenticacion():
+    c = _cliente(lambda req: httpx2.Response(401, text="invalid_client"))
+    with pytest.raises(FinnegansAuthError):
+        c.sondear("cliente", id="ZZ")
+
+
+def test_sondear_propaga_la_direccion_invalida():
+    c = _cliente(lambda req: httpx2.Response(200, text="abc"), FINNEGANS_BASE_URL="api.finneg.com")
+    with pytest.raises(FinnegansAuthError):
+        c.sondear("cliente", id="ZZ")

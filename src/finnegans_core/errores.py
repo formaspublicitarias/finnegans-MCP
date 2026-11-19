@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import re
 
+from .permisos import mensaje_sin_permiso, rechazo_en_mensaje
+
 # Cuanto detalle crudo se conserva para IT cuando el error no se reconoce.
 _DETALLE_MAX = 300
 
@@ -114,6 +116,10 @@ def traducir_error(api_id: str, mensaje: str, id: str | None = None) -> str:
     metodo = _metodo(msg)
     es_escritura = metodo in {"POST", "PUT", "PATCH", "DELETE"}
 
+    # Falta de permiso del usuario: las claves sirven, no es un parametro faltante.
+    if rechazo_en_mensaje(msg, escritura=es_escritura):
+        return mensaje_sin_permiso(metodo or "GET", recurso)
+
     if codigo == 404:
         donde = f"'{recurso}/{id}'" if id else f"'{recurso}'"
         listado = _listado_de(recurso, id)
@@ -125,15 +131,6 @@ def traducir_error(api_id: str, mensaje: str, id: str | None = None) -> str:
         return (
             f"No existe {donde} en Finnegans. Revisa que el codigo este bien escrito; "
             f"si no lo sabes de memoria, buscalo primero en '{listado}/list'."
-        )
-
-    if codigo == 403 and es_escritura:
-        # Las credenciales sirven (la lectura del token anduvo): lo que falta es permiso.
-        return (
-            f"Finnegans no le da permiso a este conector para hacer {metodo} sobre "
-            f"'{recurso}': las credenciales funcionan, pero al usuario de la API le falta "
-            f"el permiso para esa operacion. Esto no se arregla desde la conversacion: "
-            f"avisale a IT que lo habilite en Finnegans."
         )
 
     if codigo in (401, 403):

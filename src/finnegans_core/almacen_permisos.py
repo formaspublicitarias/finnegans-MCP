@@ -46,12 +46,14 @@ class AlmacenLocal:
         self._mapa: MapaPermisos | None = None
 
     def cargar(self) -> MapaPermisos:
+        if self._mapa is not None:
+            # Un guardado fallo: lo ultimo conocido manda sobre el archivo viejo.
+            return self._mapa
         try:
             datos = json.loads(self.archivo.read_text(encoding="utf-8"))
             return MapaPermisos.desde_dict(datos)
         except (OSError, ValueError, TypeError, AttributeError):
-            # Si un guardado fallo, lo ultimo conocido sigue en memoria.
-            return self._mapa if self._mapa is not None else MapaPermisos()
+            return MapaPermisos()
 
     def guardar(self, mapa: MapaPermisos) -> None:
         tmp = self.archivo.with_name(self.archivo.name + ".tmp")

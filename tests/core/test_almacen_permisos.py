@@ -97,3 +97,22 @@ def test_carpeta_datos_nunca_es_la_real_en_tests(tmp_path):
     assert carpeta_datos().name in ("Finnegans", "finnegans")
     if sys.platform != "darwin":
         assert tmp_path in carpeta_datos().parents
+
+
+def test_tras_guardado_fallido_cargar_devuelve_el_mapa_nuevo_y_no_deja_tmp(tmp_path, monkeypatch):
+    al = AlmacenLocal(tmp_path, CID)
+    viejo = _mapa()
+    al.guardar(viejo)
+    nuevo = _mapa()
+    nuevo.aplicar_escaneo({"proveedor": ("permitido", "entidad")}, "2026-11-18")
+    with monkeypatch.context() as mc:
+        mc.setattr(os, "replace", lambda *a, **k: (_ for _ in ()).throw(PermissionError("x")))
+        al.guardar(nuevo)
+    assert al.problema is not None
+    assert al.cargar() == nuevo
+    assert al.cargar() != viejo
+    assert not list(tmp_path.glob("*.tmp"))
+    # un guardado posterior exitoso vuelve a mandar el disco
+    al.guardar(nuevo)
+    assert al.problema is None
+    assert AlmacenLocal(tmp_path, CID).cargar() == nuevo

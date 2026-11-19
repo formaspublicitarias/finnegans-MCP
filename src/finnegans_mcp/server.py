@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -18,14 +19,19 @@ import anyio.to_thread
 from mcp.server import MCPServer
 from mcp_types import ToolAnnotations
 
+from finnegans_core.almacen_permisos import AlmacenLocal, AlmacenMemoria, carpeta_datos
 from finnegans_core.catalogo.busqueda import buscar_endpoint, formatear_busqueda
 from finnegans_core.catalogo.docs_mcp import DocsMcp, DocsMcpError
 from finnegans_core.catalogo.swagger import Operacion, SwaggerCatalog, SwaggerError
 from finnegans_core.client import FinnegansAuthError, FinnegansClient, FinnegansError
 from finnegans_core.config import Settings
 from finnegans_core.errores import traducir_error
+from finnegans_core.escaneo import REPORTES_EN_ESCANEO_AUTOMATICO, Escaner
 from finnegans_core.exportar import exportar as exportar_archivo
 from finnegans_core.guia import guia as guia_tema
+from finnegans_core.permisos import (
+    Acceso, Permisos, TipoRecurso, mensaje_sin_permiso, rechazo_en_mensaje,
+)
 from finnegans_core.presupuesto import RESPUESTA_MAX_CHARS, nombre_tabla, resumir_valor
 from finnegans_core.workspace import ConsultaInvalida, Resumen, Workspace
 
@@ -55,6 +61,22 @@ _MIN_POR_OPERACION = 500
 # client_id/client_secret en el query string y el swagger lleva su key ahi.
 # Claude Desktop guarda el stderr del servidor en su log.
 _LOGGERS_HTTP = ("httpx2", "httpcore2", "httpx", "httpcore")
+
+# Textos de permisos (spec §5): exactos.
+_TODO_OCULTO = (
+    "Lo que buscás existe en Finnegans, pero tu usuario no tiene permiso. Si lo "
+    "necesitás, pedíselo a quien administra Finnegans y después pedime que revise tus "
+    "permisos."
+)
+_SOLO_LECTURA = "solo lectura para vos"
+_REESCANEO_INICIADO = "Estoy revisando tus permisos, tarda unos 2 minutos."
+_REESCANEO_EN_CURSO = "Ya estoy revisando tus permisos; en un par de minutos está listo."
+_AVISO_REPORTES = (
+    "Ojo: revisar los reportes los ejecuta en Finnegans (unos 140); conviene hacerlo "
+    "fuera del horario de trabajo."
+)
+
+HacerEscaneo = Callable[["Contexto", bool], dict[str, tuple[Acceso, TipoRecurso]]]
 
 
 # ------------------------------------------------------------------ helpers
@@ -169,6 +191,15 @@ def _es_corte_de_conexion(e: BaseException) -> bool:
     )
 
 
+def _es_rechazo(e: BaseException, escritura: bool) -> bool:
+    """Finnegans rechazo por falta de permiso (no por claves malas)."""
+    return (
+        isinstance(e, FinnegansError)
+        and not isinstance(e, FinnegansAuthError)
+        and rechazo_en_mensaje(str(e), escritura=escritura)
+    )
+
+
 def _mensaje_error(
     e: BaseException, limpiar: Limpiar, api_id: str = "", id: str | None = None
 ) -> str:
@@ -186,6 +217,13 @@ def _mensaje_error(
         f"Ocurrió un error inesperado ({type(e).__name__}): {e}. "
         "Si se repite, avisale a IT."
     )
+
+
+def _permisos_por_defecto(settings: Settings) -> Permisos:
+    """Permisos guardados en esta PC; sin Client ID no hay de quien, quedan en memoria."""
+    if (settings.client_id or "").strip():
+        return Permisos(AlmacenLocal(carpeta_datos(), settings.client_id))
+    return Permisos(AlmacenMemoria())
 
 
 def _formatear_parametro(limpiar: Limpiar, p: dict) -> str:
@@ -298,16 +336,22 @@ def crear_servidor(
     contexto: Contexto | ProveedorContexto | None = None,
     modo: Literal["escritorio", "remoto"] = "escritorio",
     escanear_al_iniciar: bool = False,
+    hacer_escaneo: HacerEscaneo | None = None,
 ) -> MCPServer:
     """Arma el servidor con sus 8 herramientas. Cada dependencia se puede inyectar.
 
     Lo que es de una persona (cliente, workspace, docs, tablas cargadas,
-    redactor) vive en un Contexto: cada herramienta lo pide al proveedor al
-    empezar. Sin `contexto` se arma uno con settings, client, docs y
-    workspace; con un Contexto se usa siempre ese; con una funcion, esa es el
-    proveedor (y client, docs y workspace no se usan). El swagger es uno solo
-    para todo el proceso. `modo` por ahora solo acepta "escritorio";
-    `escanear_al_iniciar` todavia no hace nada.
+    redactor, permisos) vive en un Contexto: cada herramienta lo pide al
+    proveedor al empezar. Sin `contexto` se arma uno con settings, client, docs
+    y workspace; con un Contexto se usa siempre ese; con una funcion, esa es el
+    proveedor (y client, docs y workspace no se usan). Un Contexto sin permisos
+    recibe los de su almacen local. El swagger es uno solo para todo el
+    proceso. `modo` por ahora solo acepta "escritorio".
+
+    `hacer_escaneo(ctx, incluir_reportes)` revisa los permisos de la persona
+    (por defecto sondea Finnegans con su cliente); corre en segundo plano. Con
+    `escanear_al_iniciar`, arranca uno si la persona nunca se escaneo o el
+    ultimo escaneo fallo.
     """
     if modo != "escritorio":
         raise ValueError(
@@ -317,15 +361,35 @@ def crear_servidor(
     for nombre in _LOGGERS_HTTP:
         logging.getLogger(nombre).setLevel(logging.WARNING)
     swagger = swagger if swagger is not None else SwaggerCatalog(settings)
+    if hacer_escaneo is None:
+        def hacer_escaneo(ctx: Contexto, incluir_reportes: bool):
+            return Escaner(ctx.client).escanear(swagger.recursos(), incluir_reportes)
     if contexto is None:
         contexto = Contexto.desde_settings(settings, client, docs, workspace)
     if isinstance(contexto, Contexto):
         fijo = contexto
+        if fijo.permisos is None:
+            fijo.permisos = _permisos_por_defecto(fijo.settings)
 
-        def proveedor() -> Contexto:
+        def proveedor_base() -> Contexto:
             return fijo
     else:
-        proveedor = contexto
+        proveedor_base = contexto
+    candado_permisos = threading.Lock()
+
+    def proveedor() -> Contexto:
+        """El contexto de quien llama, con sus permisos armados si no los traia."""
+        ctx = proveedor_base()
+        if ctx.permisos is None:
+            with candado_permisos:
+                if ctx.permisos is None:
+                    ctx.permisos = _permisos_por_defecto(ctx.settings)
+        return ctx
+
+    def escanear(ctx: Contexto, incluir_reportes: bool) -> bool:
+        """Arranca un escaneo en segundo plano; False si ya habia uno corriendo."""
+        return ctx.permisos.escanear_en_segundo_plano(
+            lambda: hacer_escaneo(ctx, incluir_reportes))
 
     def error(ctx: Contexto, e: BaseException, api_id: str = "", id: str | None = None) -> str:
         return _mensaje_error(e, ctx.limpiar, api_id, id)
@@ -360,10 +424,23 @@ def crear_servidor(
         ctx = proveedor()
         try:
             r = await buscar_endpoint(consulta, swagger, ctx.docs)
+            visibles, ocultas = [], []
+            for f in r.filas:
+                (ocultas if ctx.permisos.denegado(f.path) else visibles).append(f)
+            if ocultas:
+                r.filas = visibles
+                if not visibles:
+                    return responder(ctx, _TODO_OCULTO)
+                # Una nota que nombra un path oculto lo mostraria igual.
+                nombres = {f.path.strip("/").casefold() for f in ocultas}
+                r.notas = [n for n in r.notas
+                           if not any(p in n.casefold() for p in nombres)]
             sobran = len(r.filas) - _BUSQUEDA_MAX_FILAS
             r.filas = r.filas[:_BUSQUEDA_MAX_FILAS]
             for f in r.filas:
                 f.resumen = corto(ctx, f.resumen, _RESUMEN_BUSQUEDA_MAX)
+                if ctx.permisos.solo_lectura(f.path):
+                    f.resumen = f"{f.resumen} · {_SOLO_LECTURA}" if f.resumen else _SOLO_LECTURA
             texto = formatear_busqueda(r)
             if sobran > 0:
                 texto += (
@@ -534,6 +611,8 @@ def crear_servidor(
         path: str, campo: str | None = None, metodo: str | None = None
     ) -> str:
         ctx = proveedor()
+        if ctx.permisos.denegado(path):
+            return responder(ctx, mensaje_sin_permiso("GET", path.strip("/")))
         try:
             if campo:
                 texto = _ver_campo(ctx, path, campo, metodo)
@@ -541,6 +620,8 @@ def crear_servidor(
                 texto = _ver_operaciones(ctx, path, metodo)
         except Exception as e:  # noqa: BLE001
             texto = error(ctx, e, path)
+        if ctx.permisos.solo_lectura(path):
+            texto = f"({path.strip('/')}: {_SOLO_LECTURA})\n{texto}"
         return responder(ctx, texto, "Pedí un path exacto o un campo puntual.")
 
     # ------------------------------------------------------------------ leer
@@ -615,7 +696,11 @@ def crear_servidor(
         try:
             datos = ctx.client.request("GET", path, id=id, params=params)
         except Exception as e:  # noqa: BLE001
+            if _es_rechazo(e, escritura=False):
+                ctx.permisos.registrar_lectura(path, ok=False)
             return responder(ctx, error(ctx, e, path, id))
+        # Un denegado viejo se corrige: el permiso pudo darse despues del escaneo.
+        ctx.permisos.registrar_lectura(path, ok=True)
         nombre = nombre_tabla(tabla) if tabla else nombre_tabla(path, id)
         try:
             with ctx.candado:
@@ -883,6 +968,8 @@ def crear_servidor(
                     "cambio ya está; reintentar sin revisar puede duplicar un alta.\n"
                     f"Detalle técnico (para IT): {corto(ctx, e, _RESPUESTA_API_MAX)}"
                 )
+            if _es_rechazo(e, escritura=True):
+                ctx.permisos.registrar_escritura_denegada(path)
             return responder(ctx, f"La escritura {m} {destino} falló.\n{error(ctx, e, path, id)}")
         estado["enviado"] = True
 
@@ -1035,7 +1122,8 @@ def crear_servidor(
         description=(
             "Revisa la configuración de la extensión: que estén todas las claves, que "
             "Finnegans dé un token, que cargue el swagger y que responda la "
-            "documentación. Dice en castellano qué clave está mal."
+            "documentación. Dice en castellano qué clave está mal. Con reescanear=True "
+            "revisa de nuevo qué reportes y entidades puede usar tu usuario."
         ),
         annotations=ToolAnnotations(
             title="Verificar conexión", read_only_hint=True, idempotent_hint=True,
@@ -1043,7 +1131,9 @@ def crear_servidor(
         ),
         structured_output=False,
     )
-    async def verificar_conexion_tool() -> str:
+    async def verificar_conexion_tool(
+        reescanear: bool = False, incluir_reportes: bool = False
+    ) -> str:
         ctx = proveedor()
         lineas = ["Verificación de la conexión con Finnegans:"]
         faltan = ctx.settings.faltantes()
@@ -1096,14 +1186,30 @@ def crear_servidor(
                 "- Documentación de Finnegans (MCP de docs): sin verificar, faltan sus "
                 "claves. La búsqueda funciona solo con el swagger."
             )
+
+        if reescanear:
+            if escanear(ctx, incluir_reportes or REPORTES_EN_ESCANEO_AUTOMATICO):
+                lineas.append(_REESCANEO_INICIADO)
+            else:
+                lineas.append(_REESCANEO_EN_CURSO)
+            if incluir_reportes and not REPORTES_EN_ESCANEO_AUTOMATICO:
+                lineas.append(_AVISO_REPORTES)
+        lineas.append(f"- {ctx.permisos.estado_texto()}")
+        if ctx.permisos.problema_almacen:
+            lineas.append(ctx.permisos.problema_almacen)
         return responder(ctx, "\n".join(lineas))
+
+    if escanear_al_iniciar:
+        ctx = proveedor()
+        if ctx.permisos.estado in ("sin_escanear", "fallo"):
+            escanear(ctx, REPORTES_EN_ESCANEO_AUTOMATICO)
 
     return server
 
 
 def main() -> None:
     """Punto de entrada de la extension: servidor MCP por stdio."""
-    crear_servidor(Settings.from_env()).run()
+    crear_servidor(Settings.from_env(), escanear_al_iniciar=True).run()
 
 
 if __name__ == "__main__":

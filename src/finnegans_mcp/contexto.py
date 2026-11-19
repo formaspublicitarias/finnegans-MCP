@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Callable
 
 from finnegans_core.catalogo.docs_mcp import DocsMcp
 from finnegans_core.client import FinnegansClient
 from finnegans_core.config import Settings
+from finnegans_core.permisos import Permisos
 from finnegans_core.secretos import Redactor
 from finnegans_core.workspace import Workspace
 
@@ -24,8 +25,9 @@ class Contexto:
     client: FinnegansClient
     workspace: Workspace
     docs: DocsMcp
-    # Mapa de permisos de la persona: lo llena una tarea posterior.
-    permisos: Any = None
+    # Lo que puede usar la persona en Finnegans. Si queda en None, crear_servidor
+    # arma uno con su almacen local.
+    permisos: Permisos | None = None
     # Path del que salio cada tabla: una fila de un /list o de un reporte no
     # es el registro completo y no sirve como base de un PUT.
     origen_tabla: dict[str, str] = field(default_factory=dict)
@@ -35,6 +37,8 @@ class Contexto:
 
     def __post_init__(self) -> None:
         self._redactor = Redactor(self.settings.secretos())
+        # Aca y no en desde_settings: todo Contexto redacta el workspace antes de cortar.
+        self.workspace.usar_redactor(self.limpiar)
 
     def limpiar(self, texto: object) -> str:
         """Borra secretos: primero el redactor del cliente (conoce el token), despues las claves."""
@@ -57,14 +61,12 @@ class Contexto:
         workspace: Workspace | None = None,
     ) -> Contexto:
         """Contexto con lo que no se inyecte armado desde las claves."""
-        ctx = cls(
+        return cls(
             settings=settings,
             client=client if client is not None else FinnegansClient(settings),
             workspace=workspace if workspace is not None else Workspace(),
             docs=docs if docs is not None else DocsMcp(settings),
         )
-        ctx.workspace.usar_redactor(ctx.limpiar)
-        return ctx
 
 
 ProveedorContexto = Callable[[], Contexto]

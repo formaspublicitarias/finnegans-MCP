@@ -12,9 +12,11 @@ from typing import Any, Callable
 import httpx2
 import pytest
 
+from finnegans_core.almacen_permisos import AlmacenMemoria
 from finnegans_core.catalogo.swagger import SwaggerCatalog
 from finnegans_core.client import FinnegansError
 from finnegans_core.config import Settings
+from finnegans_core.permisos import Permisos
 from finnegans_core.secretos import Redactor
 from finnegans_core.workspace import Workspace
 from finnegans_mcp.contexto import Contexto
@@ -196,6 +198,7 @@ class Entorno:
     workspace: Workspace
     settings: Settings
     docs: Any
+    permisos: Permisos | None = None
 
     async def llamar(self, _herramienta: str, **argumentos) -> str:
         r = await self.server.call_tool(_herramienta, argumentos)
@@ -206,9 +209,11 @@ class Entorno:
 @pytest.fixture
 def armar(tmp_path):
     abiertos: list[Workspace] = []
+    permisos_creados: list[Permisos] = []
 
     def _armar(handler=None, spec=SPEC, vos=None, docs=None, settings=None,
-               error_token=None, status_swagger=200, usar_docs_real=False) -> Entorno:
+               error_token=None, status_swagger=200, usar_docs_real=False,
+               permisos=None, hacer_escaneo=None, escanear_al_iniciar=False) -> Entorno:
         s = settings or ajustes(tmp_path)
         cli = ClienteFalso(s, handler, error_token=error_token)
         sw = catalogo(s, spec, vos, status=status_swagger)
@@ -216,10 +221,18 @@ def armar(tmp_path):
         abiertos.append(ws)
         d = None if usar_docs_real else (docs or DocsFalso())
         ctx = Contexto.desde_settings(s, client=cli, docs=d, workspace=ws)
-        server = crear_servidor(s, swagger=sw, contexto=ctx)
-        return Entorno(server, cli, ws, s, d)
+        ctx.permisos = permisos if permisos is not None else Permisos(AlmacenMemoria())
+        permisos_creados.append(ctx.permisos)
+        # ClienteFalso no sabe sondear: sin un escaneo inyectado, uno vacio.
+        escaneo = hacer_escaneo or (lambda ctx, incluir_reportes: {})
+        server = crear_servidor(s, swagger=sw, contexto=ctx, hacer_escaneo=escaneo,
+                                escanear_al_iniciar=escanear_al_iniciar)
+        return Entorno(server, cli, ws, s, d, ctx.permisos)
 
     yield _armar
+    for p in permisos_creados:
+        # Ningun test deja un escaneo corriendo en otro hilo.
+        assert p.esperar_escaneo(5), "quedo un escaneo de permisos corriendo"
     for ws in abiertos:
         ws.cerrar()
 

@@ -81,3 +81,19 @@ async def test_secretos_de_cada_contexto_se_enmascaran_en_el_suyo(tmp_path):
 def test_modo_remoto_todavia_no_existe(tmp_path):
     with pytest.raises(ValueError):
         crear_servidor(ajustes(tmp_path), modo="remoto")
+
+
+def test_contexto_armado_a_mano_redacta_el_workspace(tmp_path):
+    """El redactor del workspace se conecta al crear el Contexto, no solo en desde_settings."""
+    from finnegans_core.workspace import Workspace
+
+    from .conftest import CLIENT_SECRET
+
+    s = ajustes(tmp_path)
+    ctx = Contexto(settings=s, client=ClienteFalso(s), workspace=Workspace(), docs=DocsFalso())
+    try:
+        resumen = ctx.workspace.cargar("t", f"respuesta con {CLIENT_SECRET} adentro")
+        assert resumen.nota
+        assert CLIENT_SECRET not in resumen.nota
+    finally:
+        ctx.cerrar()

@@ -7,11 +7,15 @@ entidad sin permiso contesta 500 "No tiene permisos ...". Solo libreria estandar
 from __future__ import annotations
 
 import re
+import threading
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Literal
+from typing import TYPE_CHECKING, Callable, Literal
 
 from .vocabulario import sin_acentos
+
+if TYPE_CHECKING:
+    from .almacen_permisos import AlmacenPermisos
 
 ACCIONES: dict[str, str] = {
     "GET": "ver",
@@ -187,3 +191,130 @@ class MapaPermisos:
             )
         except (KeyError, TypeError, AttributeError) as exc:
             raise ValueError("mapa de permisos invalido") from exc
+
+
+# Estados en los que vale lo que dijo un escaneo: el ultimo termino bien, o
+# fallo y se usa el anterior. Mientras escanea o antes del primero no se oculta
+# nada (solo lo aprendido por uso).
+_ESTADOS_CON_ESCANEO = ("listo", "fallo")
+
+
+class Permisos:
+    """Lo que puede usar una persona, para las herramientas. Seguro entre hilos.
+
+    Las herramientas sincronicas corren en hilos y el escaneo en otro: todo
+    pasa por un solo candado, tambien el guardado (el almacen no es seguro
+    entre hilos).
+    """
+
+    def __init__(self, almacen: AlmacenPermisos) -> None:
+        self._almacen = almacen
+        self._candado = threading.Lock()
+        mapa = almacen.cargar()
+        if mapa.estado == "escaneando":
+            # Se corto a mitad de un escaneo (la app se cerro): hay que escanear de nuevo.
+            mapa.estado = "sin_escanear"
+        self._mapa = mapa
+        self._hilo: threading.Thread | None = None
+
+    # ------------------------------------------------------------ consultas
+    @property
+    def estado(self) -> EstadoEscaneo:
+        with self._candado:
+            return self._mapa.estado
+
+    @property
+    def problema_almacen(self) -> str | None:
+        with self._candado:
+            return getattr(self._almacen, "problema", None)
+
+    def denegado(self, path: str) -> bool:
+        clave = clave_permiso(path)
+        with self._candado:
+            entrada = self._mapa.entradas.get(clave) if clave else None
+            if entrada is None or entrada.acceso != "denegado":
+                return False
+            return entrada.fuente == "uso" or self._mapa.estado in _ESTADOS_CON_ESCANEO
+
+    def solo_lectura(self, path: str) -> bool:
+        # Una escritura rechazada vale siempre: solo se aprende por uso.
+        with self._candado:
+            return self._mapa.solo_lectura(path)
+
+    def estado_texto(self, hoy: date | None = None) -> str:
+        with self._candado:
+            estado = self._mapa.estado
+            if estado == "escaneando":
+                return "Permisos: todavía revisando"
+            if estado == "sin_escanear":
+                return "Permisos: todavía no se revisaron"
+            if estado == "fallo":
+                return "Permisos: la última revisión falló; se usa la anterior"
+            r, rt, e, et = self._mapa.resumen()
+            cuando = _fecha(self._mapa.escaneo_fin) or hoy or date.today()
+        return (
+            f"Permisos revisados el {cuando:%d/%m}: {r} de {rt} reportes y {e} de {et} "
+            "entidades disponibles"
+        )
+
+    # ------------------------------------------------------- lo aprendido
+    def registrar_lectura(self, path: str, ok: bool) -> None:
+        """Una lectura que anduvo corrige un denegado viejo; un rechazo lo marca."""
+        with self._candado:
+            if ok:
+                if self._mapa.acceso(path) != "denegado":
+                    return
+                cambio = self._mapa.corregir(path, "permitido")
+            else:
+                cambio = self._mapa.corregir(path, "denegado")
+            if cambio:
+                self._almacen.guardar(self._mapa)
+
+    def registrar_escritura_denegada(self, path: str) -> None:
+        with self._candado:
+            if self._mapa.marcar_escritura_denegada(path):
+                self._almacen.guardar(self._mapa)
+
+    # ------------------------------------------------------------ escaneo
+    def escanear_en_segundo_plano(
+        self, hacer: Callable[[], dict[str, tuple[Acceso, TipoRecurso]]]
+    ) -> bool:
+        """Corre `hacer` en un hilo aparte. False si ya hay un escaneo corriendo."""
+        with self._candado:
+            if self._hilo is not None and self._hilo.is_alive():
+                return False
+            self._mapa.estado = "escaneando"
+            hilo = threading.Thread(
+                target=self._escanear, args=(hacer,), name="finnegans-escaneo-permisos",
+                daemon=True,
+            )
+            self._hilo = hilo
+            hilo.start()
+        return True
+
+    def _escanear(self, hacer: Callable[[], dict[str, tuple[Acceso, TipoRecurso]]]) -> None:
+        try:
+            resultado = hacer()
+            with self._candado:
+                self._mapa.aplicar_escaneo(resultado, date.today().isoformat())
+                self._almacen.guardar(self._mapa)
+        except Exception:  # noqa: BLE001 - un escaneo fallido conserva el mapa anterior
+            with self._candado:
+                self._mapa.estado = "fallo"
+                self._almacen.guardar(self._mapa)
+
+    def esperar_escaneo(self, timeout: float | None = None) -> bool:
+        """Espera al escaneo en curso. True si no queda ninguno corriendo."""
+        with self._candado:
+            hilo = self._hilo
+        if hilo is None:
+            return True
+        hilo.join(timeout)
+        return not hilo.is_alive()
+
+
+def _fecha(texto: str | None) -> date | None:
+    try:
+        return date.fromisoformat((texto or "")[:10])
+    except ValueError:
+        return None

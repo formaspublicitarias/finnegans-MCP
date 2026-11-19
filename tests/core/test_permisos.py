@@ -105,3 +105,149 @@ def test_ida_y_vuelta_a_dict():
     d = m.a_dict()
     assert d["escritura_denegada"] == ["x"]
     assert MapaPermisos.desde_dict(d) == m
+
+
+# ------------------------------------------------------------ fachada Permisos
+
+import threading
+from datetime import date
+
+from finnegans_core.almacen_permisos import AlmacenMemoria
+from finnegans_core.permisos import Permisos
+
+
+class AlmacenContador(AlmacenMemoria):
+    """AlmacenMemoria que cuenta los guardados."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.guardados = 0
+
+    def guardar(self, mapa: MapaPermisos) -> None:
+        self.guardados += 1
+        super().guardar(mapa)
+
+
+def _almacen_con(resultado, estado=None, cuando="2026-11-17") -> AlmacenContador:
+    almacen = AlmacenContador()
+    mapa = almacen.cargar()
+    mapa.aplicar_escaneo(resultado, cuando)
+    if estado is not None:
+        mapa.estado = estado
+    return almacen
+
+
+def test_estado_texto_con_numeros():
+    almacen = _almacen_con({
+        "reports/a": ("permitido", "reporte"),
+        "reports/b": ("desconocido", "reporte"),
+        "reports/c": ("denegado", "reporte"),
+        "cliente": ("permitido", "entidad"),
+        "proveedor": ("denegado", "entidad"),
+    })
+    p = Permisos(almacen)
+    assert p.estado_texto(hoy=date(2026, 11, 17)) == (
+        "Permisos revisados el 17/11: 2 de 3 reportes y 1 de 2 entidades disponibles"
+    )
+
+
+def test_estado_texto_de_cada_estado():
+    assert Permisos(AlmacenMemoria()).estado_texto() == "Permisos: todavía no se revisaron"
+    fallo = Permisos(_almacen_con({"cliente": ("denegado", "entidad")}, estado="fallo"))
+    assert fallo.estado_texto() == "Permisos: la última revisión falló; se usa la anterior"
+
+
+def test_mapa_guardado_escaneando_carga_sin_escanear_y_no_oculta():
+    p = Permisos(_almacen_con({"cliente": ("denegado", "entidad")}, estado="escaneando"))
+    assert p.estado == "sin_escanear"
+    assert p.estado_texto() == "Permisos: todavía no se revisaron"
+    assert not p.denegado("cliente")
+
+
+def test_listo_y_fallo_usan_el_escaneo():
+    assert Permisos(_almacen_con({"cliente": ("denegado", "entidad")})).denegado("cliente/list")
+    p = Permisos(_almacen_con({"cliente": ("denegado", "entidad")}, estado="fallo"))
+    assert p.denegado("/api/Cliente/2956")
+
+
+def test_lo_aprendido_por_uso_cuenta_sin_escaneo():
+    p = Permisos(AlmacenMemoria())
+    p.registrar_lectura("reports/X", ok=False)
+    p.registrar_escritura_denegada("cliente/2956")
+    assert p.estado == "sin_escanear"
+    assert p.denegado("/reports/x")
+    assert p.solo_lectura("Cliente")
+    assert not p.solo_lectura("proveedor")
+
+
+def test_registrar_lectura_corrige_y_guarda_solo_si_cambia():
+    almacen = _almacen_con({"cliente": ("denegado", "entidad"),
+                            "proveedor": ("permitido", "entidad")})
+    p = Permisos(almacen)
+    p.registrar_lectura("proveedor/list", ok=True)  # ya permitido
+    p.registrar_lectura("pedido", ok=True)  # no mapeado: no se agrega
+    assert almacen.guardados == 0
+    p.registrar_lectura("cliente/list", ok=True)
+    assert not p.denegado("cliente")
+    assert almacen.guardados == 1
+    p.registrar_lectura("cliente", ok=False)
+    p.registrar_lectura("cliente", ok=False)
+    assert p.denegado("cliente")
+    assert almacen.guardados == 2
+    p.registrar_escritura_denegada("cliente")
+    p.registrar_escritura_denegada("cliente")
+    assert almacen.guardados == 3
+
+
+def test_escaneo_en_segundo_plano_no_se_duplica_y_aplica():
+    almacen = AlmacenContador()
+    p = Permisos(almacen)
+    liberar = threading.Event()
+
+    def hacer():
+        assert liberar.wait(5)
+        return {"cliente": ("denegado", "entidad")}
+
+    assert p.escanear_en_segundo_plano(hacer)
+    try:
+        assert p.estado == "escaneando"
+        assert p.estado_texto() == "Permisos: todavía revisando"
+        assert not p.escanear_en_segundo_plano(hacer)
+    finally:
+        liberar.set()
+    assert p.esperar_escaneo(5)
+    assert p.estado == "listo"
+    assert p.denegado("cliente")
+    assert almacen.guardados == 1
+    assert p.estado_texto().startswith("Permisos revisados el ")
+
+
+def test_escaneo_que_falla_conserva_el_mapa():
+    almacen = _almacen_con({"cliente": ("denegado", "entidad")})
+    p = Permisos(almacen)
+
+    def hacer():
+        raise RuntimeError("se cayo la red")
+
+    assert p.escanear_en_segundo_plano(hacer)
+    assert p.esperar_escaneo(5)
+    assert p.estado == "fallo"
+    assert p.denegado("cliente")
+    assert almacen.guardados == 1
+    assert almacen.cargar().estado == "fallo"
+    # Despues de un fallo se puede volver a escanear.
+    assert p.escanear_en_segundo_plano(lambda: {"cliente": ("permitido", "entidad")})
+    assert p.esperar_escaneo(5)
+    assert not p.denegado("cliente")
+
+
+def test_problema_almacen_se_reenvia():
+    almacen = AlmacenMemoria()
+    p = Permisos(almacen)
+    assert p.problema_almacen is None
+    almacen.problema = "No pude guardar"
+    assert p.problema_almacen == "No pude guardar"
+
+
+def test_esperar_escaneo_sin_escaneo_es_inmediato():
+    assert Permisos(AlmacenMemoria()).esperar_escaneo(0)
